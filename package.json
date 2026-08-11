@@ -1,0 +1,42 @@
+{
+  "name": "section-transition",
+  "version": "0.6.0",
+  "description": "Scene-aware section transitions powered by GSAP ScrollTrigger, with bounded sequence caching and persistent canvas backgrounds.",
+  "main": "dist/section-transition.mjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "npm run build && node tests/unit.mjs && node tests/smoke.mjs"
+  },
+  "files": [
+    "dist",
+    "src",
+    "examples",
+    "README.md",
+    "ARCHITECTURE.md",
+    "AI_AGENT_GUIDE.md",
+    "TESTING.md",
+    "CHANGELOG.md",
+    "MIGRATION.md",
+    "RELEASE_MANIFEST.json"
+  ],
+  "license": "UNLICENSED",
+  "type": "module",
+  "browser": "dist/section-transition.js",
+  "exports": {
+    ".": {
+      "import": "./dist/section-transition.mjs",
+      "default": "./dist/section-transition.mjs"
+    },
+    "./dist/section-transition.js": "./dist/section-transition.js",
+    "./dist/section-transition.css": "./dist/section-transition.css",
+    "./gsap": "./dist/section-transition-gsap.mjs"
+  },
+  "peerDependencies": {
+    "gsap": ">=3.13.0"
+  },
+  "peerDependenciesMeta": {
+    "gsap": {
+      "optional": true
+    }
+  }
+}

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SectionTransition v0.6.0 — Snap Sequence</title>
+  <link rel="stylesheet" href="../dist/section-transition.css">
+  <style>
+    body { margin:0; font-family:system-ui,sans-serif; }
+    section { box-sizing:border-box; min-height:100vh; padding:8vw; }
+    .source { min-height:240vh; background:#161616; color:#fff; }
+    .next { background:#f2f2f2; color:#111; }
+  </style>
+</head>
+<body>
+  <section class="source" data-exit-transition="office-to-factory">
+    <h1>Office</h1>
+    <p>This long section remains normal scrolling content.</p>
+    <div style="height:120vh"></div>
+    <h2>End of section</h2>
+    <p>Scroll progress drives the media; release snaps toward an endpoint.</p>
+  </section>
+
+  <section class="next" id="factory">
+    <h1>Factory</h1>
+    <p>Scroll upward at this boundary to reverse automatically.</p>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
+  <script src="../dist/section-transition.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", async () => {
+      window.sectionTransitions = await SectionTransition.init({
+        debug: true,
+        transitions: {
+          "office-to-factory": {
+            source: {
+              type: "sequence",
+              src: "./assets/office-factory/frame-{frame}.webp",
+              count: 120,
+              start: 1,
+              padding: 4
+            },
+            scroll: {
+              mode: "snap",
+              reversible: true
+            },
+            playback: {
+              duration: 1600
+            },
+            cache: {
+              maxFrames: 24
+            }
+          }
+        }
+      });
+    });
+  </script>
+</body>
+</html>

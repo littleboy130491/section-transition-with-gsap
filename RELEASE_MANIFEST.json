@@ -1,0 +1,75 @@
+{
+  "version": "0.6.0",
+  "zip": "section-transition-v0.6.0.zip",
+  "architecture": {
+    "primary_scroll_engine": "GSAP ScrollTrigger",
+    "scrub": "ScrollTrigger-driven normalized progress",
+    "snap": "ScrollTrigger-driven progress + endpoint snapping; CSS scroll-snap remains authoritative when snap=auto and already enabled",
+    "auto_alias": "snap",
+    "takeover_compatibility": "explicit scroll.mode=takeover",
+    "legacy_scrub": "scroll.engine=legacy"
+  },
+  "peer_dependencies": {
+    "gsap": ">=3.13.0",
+    "bundled": false
+  },
+  "entrypoints": {
+    "javascript_iife": "dist/section-transition.js",
+    "javascript_esm": "dist/section-transition.mjs",
+    "javascript_esm_with_gsap_registration": "dist/section-transition-gsap.mjs",
+    "css": "dist/section-transition.css"
+  },
+  "kept_sectiontransition_layers": [
+    "SceneBackgroundEngine",
+    "AssetManager",
+    "FrameCache",
+    "SequenceRenderer",
+    "VideoRenderer",
+    "scene attributes",
+    "diagnostics/fallbacks"
+  ],
+  "scene_attributes": {
+    "name": "data-st-scene",
+    "background": "data-st-background",
+    "outgoing_transition": "data-st-scrub"
+  },
+  "media": {
+    "sequence_cache": "bounded decoded-frame LRU with priority preloading/backoff",
+    "video_forward": "source.src",
+    "video_reverse": "source.reverseSrc",
+    "scroll_linked_reverse_switch": "pre-seek alternate encode and atomically swap after drawable seek",
+    "video_trim_seconds": "source.trim/source.reverseTrim",
+    "normalized_ranges": "playback.range/playback.reverseRange"
+  },
+  "content_choreography": {
+    "primary_engine": "GSAP timeline synchronized with media playhead",
+    "viewport_entrance": "separate ScrollTrigger when content.enter.trigger=viewport",
+    "effects": [
+      "native",
+      "fade",
+      "fade-up",
+      "fade-down",
+      "scale"
+    ]
+  },
+  "mobile_viewport_guidance": {
+    "fullscreen_host_css": "min-height: 100vh; min-height: 100dvh;",
+    "avoid_for_dynamic_fullscreen": "100svh",
+    "ownership": "host-site CSS, not core package CSS"
+  },
+  "docs": [
+    "README.md",
+    "MIGRATION.md",
+    "ARCHITECTURE.md",
+    "AI_AGENT_GUIDE.md",
+    "TESTING.md",
+    "CHANGELOG.md"
+  ],
+  "examples": [
+    "examples/scrub-scene-background.html",
+    "examples/auto-image-sequence.html",
+    "examples/auto-video.html",
+    "examples/scrub-image-sequence.html",
+    "examples/self-contained-demo.html"
+  ]
+}

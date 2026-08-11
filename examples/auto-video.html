@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SectionTransition v0.6.0 — Snap Video</title>
+  <link rel="stylesheet" href="../dist/section-transition.css">
+</head>
+<body style="margin:0">
+  <header style="position:fixed;top:0;left:0;right:0;z-index:1000;padding:20px 8vw;color:#fff;mix-blend-mode:difference">Persistent header</header>
+  <section style="min-height:180vh;background:#111;color:#fff;padding:8vw;box-sizing:border-box"
+           data-exit-transition="building-to-product">
+    <div data-st-leave><h1>Building</h1><p>Source copy fades as the transition begins.</p></div>
+  </section>
+  <section id="product" style="min-height:100vh;padding:8vw"><div data-st-enter><h1>Product</h1><p>Target copy reveals during handoff.</p></div></section>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
+  <script src="../dist/section-transition.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", async () => {
+      window.sectionTransitions = await SectionTransition.init({
+        transitions: {
+          "building-to-product": {
+            source: {
+              type: "video",
+              src: "./assets/building-to-product.mp4",
+              reverseSrc: "./assets/product-to-building.mp4",
+              trim: { start: 0, end: 2.8 }
+            },
+            scroll: {
+              mode: "snap"
+            },
+            render: {
+              zIndex: 900
+            },
+            content: {
+              leave: {
+                effect: "fade-up",
+                end: 0.16,
+                distance: 12
+              },
+              enter: {
+                effect: "fade-up",
+                duration: 260,
+                distance: 24,
+                stagger: 45
+              }
+            },
+            playback: {
+              videoMode: "auto",
+              duration: 1800,
+              range: { start: 0, end: 0.96 },
+              handoff: {
+                startAt: 0.88,
+                hold: 80,
+                fade: 180,
+                transform: {
+                  from: { scale: 1, x: 0, y: 0 },
+                  to: { scale: 1.025, x: -6, y: 4 }
+                }
+              }
+            }
+          }
+        }
+      });
+    });
+  </script>
+</body>
+</html>

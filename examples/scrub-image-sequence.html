@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SectionTransition v0.6.0 — ScrollTrigger Scrub Sequence</title>
+  <link rel="stylesheet" href="../dist/section-transition.css">
+  <style>
+    html, body { margin: 0; }
+    .chapter { min-height: 100vh; min-height: 100dvh; position: relative; }
+    /* Optional: use this only when page text should remain above scrub media. */
+    .chapter__content { position: relative; z-index: 100; padding: 8vw; }
+  </style>
+</head>
+<body>
+  <!-- No SectionTransition-specific HTML/data attributes are required. -->
+  <section id="hero" class="chapter" style="min-height:160dvh">
+    <div class="chapter__content">
+      <h1>Long hero/content section</h1>
+      <p>Its extra height scrolls normally. Scrub begins on its final viewport.</p>
+    </div>
+  </section>
+
+  <section id="product" class="chapter">
+    <div class="chapter__content"><h1>Product</h1></div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
+  <script src="../dist/section-transition.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", async () => {
+      window.sectionTransitions = await SectionTransition.init({
+        render: { zIndex: 90 },
+        transitions: {
+          "hero-to-product": {
+            from: "#hero",
+            to: "#product",
+            source: {
+              type: "sequence",
+              src: "./assets/product/frame-{frame}.webp",
+              count: 90
+            },
+            scroll: {
+              mode: "scrub",
+              scrubStart: "leave",
+              scrubRange: "sections",
+              scrub: 0.04
+            }
+          }
+        }
+      });
+    });
+  </script>
+</body>
+</html>

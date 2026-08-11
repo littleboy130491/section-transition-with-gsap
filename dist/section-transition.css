@@ -1,0 +1,198 @@
+/**
+ * SectionTransition v0.6.0
+ * Structural CSS only. Visual design remains controlled by transition config.
+ */
+
+.st-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.st-stage {
+  position: sticky;
+  top: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  contain: paint;
+}
+
+/* Auto mode and the scrub anchor never contribute document height. */
+.st-spacer--auto,
+.st-spacer--scrub-anchor {
+  height: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  pointer-events: none;
+}
+
+.st-stage--auto {
+  position: absolute;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.st-stage--auto-playing {
+  position: fixed;
+  inset: 0;
+  z-index: var(--st-z-index, 900);
+  width: 100%;
+  height: 100dvh;
+  visibility: visible;
+  touch-action: none;
+  will-change: opacity;
+}
+
+/*
+ * v0.4 native scrub engine.
+ *
+ * The track is absolutely positioned over an already-existing portion of the
+ * document, so it adds zero layout/scroll height. Its height is the authored
+ * source→endpoint span plus one live viewport. That gives the sticky child an
+ * exact native sticky range without JS simulating a fixed overlay.
+ */
+.st-scrub-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: calc(var(--st-scrub-span, 1px) + 100vh);
+  height: calc(var(--st-scrub-span, 1px) + 100dvh);
+  pointer-events: none;
+  z-index: var(--st-z-index, 900);
+}
+
+.st-stage--scrub-sticky {
+  position: sticky;
+  top: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  will-change: opacity;
+}
+
+.st-stage--scrub-sticky.st-stage--scrub-active {
+  visibility: visible;
+  opacity: 1;
+}
+
+
+/* v0.6 ScrollTrigger visual fallback for non-scene integrations. */
+.st-stage--scrolltrigger {
+  position: fixed;
+  inset: 0;
+  z-index: var(--st-z-index, 900);
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.st-stage--scrolltrigger.st-stage--scrolltrigger-active {
+  visibility: visible;
+  opacity: 1;
+}
+
+.st-stage--handoff {
+  pointer-events: none;
+}
+
+.st-canvas,
+.st-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.st-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .st-spacer {
+    height: 0 !important;
+  }
+  .st-scrub-track {
+    display: none !important;
+  }
+}
+
+/*
+ * v0.5 persistent scrub scene engine.
+ *
+ * One fixed visual surface owns declarative scene backgrounds. Authored scene
+ * sections remain in normal document flow and are promoted above this surface
+ * only after a drawable background/endpoint exists.
+ */
+.st-scene-engine {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: var(--st-scene-z-index, 0);
+  contain: strict;
+  transform: translateZ(0);
+}
+
+.st-scene-canvas,
+.st-scene-media-host {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.st-scene-canvas {
+  z-index: 0;
+}
+
+.st-scene-media-host {
+  z-index: 1;
+  overflow: hidden;
+}
+
+.st-stage--scene-transition {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  background: transparent !important;
+}
+
+.st-stage--scene-transition.st-stage--scene-active {
+  visibility: visible;
+  opacity: 1;
+}
+
+/*
+ * Ownership is applied only after the scene engine has a drawable background
+ * or committed transition endpoint. This preserves authored CSS as a fail-open
+ * fallback while media is unavailable.
+ */
+.st-scene-owned {
+  background-image: none !important;
+  background-color: transparent !important;
+}
+
+.st-scene-content-layer {
+  z-index: var(--st-scene-content-z, 1);
+}

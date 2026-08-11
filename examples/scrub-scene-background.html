@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>SectionTransition v0.6 Scene Scrub</title>
+  <link rel="stylesheet" href="../dist/section-transition.css">
+  <style>
+    html, body { margin: 0; }
+    body { font-family: system-ui, sans-serif; }
+    .chapter {
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: grid;
+      align-items: center;
+      padding: 8vw;
+      box-sizing: border-box;
+    }
+    .chapter__content { max-width: 42rem; }
+    .chapter--tall { min-height: 140dvh; align-items: start; padding-top: 20dvh; }
+    /* Optional fallback while data-st-background is still loading. */
+    .chapter { background: #e8e4dc center / cover no-repeat; }
+  </style>
+</head>
+<body>
+  <section
+    id="desk"
+    class="chapter"
+    data-st-scene="desk"
+    data-st-background="./assets/desk.webp"
+    data-st-scrub="desk-to-woman"
+  >
+    <div class="chapter__content">
+      <h1>Desk scene</h1>
+      <p>This HTML scrolls normally over the persistent scene canvas.</p>
+    </div>
+  </section>
+
+  <section
+    id="woman"
+    class="chapter chapter--tall"
+    data-st-scene="woman"
+    data-st-background="./assets/woman.webp"
+    data-st-scrub="woman-to-idea"
+  >
+    <div class="chapter__content">
+      <h2>Woman scene</h2>
+      <p>The section may be taller than one viewport. Extra content scrolls normally first.</p>
+    </div>
+  </section>
+
+  <section
+    id="idea"
+    class="chapter"
+    data-st-scene="idea"
+    data-st-background="./assets/idea.webp"
+  >
+    <div class="chapter__content">
+      <h2>Idea scene</h2>
+    </div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
+  <script src="../dist/section-transition.js"></script>
+  <script>
+    SectionTransition.init({
+      scene: {
+        zIndex: 0,
+        contentZIndex: 1,
+        preloadAhead: 1,
+        cacheMax: 4
+      },
+      transitions: {
+        "desk-to-woman": {
+          source: {
+            type: "sequence",
+            src: "./assets/desk-woman-{frame}.webp",
+            count: 120
+          },
+          scroll: {
+            mode: "scrub",
+            scrubEngine: "auto",
+            scrubRange: "sections",
+            scrub: 0.04
+          }
+        },
+        "woman-to-idea": {
+          source: {
+            type: "sequence",
+            src: "./assets/woman-idea-{frame}.webp",
+            count: 120
+          },
+          scroll: {
+            mode: "scrub",
+            scrubEngine: "auto",
+            scrubRange: "sections",
+            scrub: 0.04
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>

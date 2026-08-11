@@ -1,0 +1,65 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+
+const bundle = fs.readFileSync(new URL("../dist/section-transition.js", import.meta.url), "utf8");
+const esm = fs.readFileSync(new URL("../dist/section-transition.mjs", import.meta.url), "utf8");
+const css = fs.readFileSync(new URL("../dist/section-transition.css", import.meta.url), "utf8");
+
+assert.match(bundle, /version:\s*"0\.6\.0"/);
+assert.match(bundle, /class FrameCache/);
+assert.match(bundle, /class AssetManager/);
+assert.match(bundle, /class ScrubDriver/);
+assert.match(bundle, /class ScrollTriggerDriver/);
+assert.match(bundle, /class GSAPContentTimeline/);
+assert.match(bundle, /registerGSAP/);
+assert.match(bundle, /GSAP \+ ScrollTrigger are required/);
+
+assert.match(bundle, /class SceneBackgroundEngine/);
+assert.match(bundle, /data-st-background/);
+assert.match(bundle, /data-st-scrub/);
+assert.match(bundle, /persistent-scene-background/);
+assert.match(css, /st-scene-engine/);
+assert.match(css, /st-scene-canvas/);
+assert.match(css, /st-stage--scene-transition/);
+assert.match(css, /st-scene-owned/);
+assert.match(bundle, /hasDrawableFrame/);
+assert.match(bundle, /afterRender/);
+assert.match(bundle, /scrubStart/);
+assert.match(bundle, /scrubRange/);
+assert.match(bundle, /targetSection/);
+assert.match(css, /st-stage--scrub-sticky/);
+assert.match(css, /st-stage--scrub-active/);
+assert.match(css, /st-scrub-track/);
+assert.match(css, /st-spacer--scrub-anchor/);
+assert.match(bundle, /class TakeoverDriver/);
+assert.match(bundle, /class ContentAnimator/);
+assert.match(bundle, /class InputManager/);
+assert.match(bundle, /class ScrollLockManager/);
+assert.match(bundle, /claimAuto/);
+assert.match(bundle, /pending/);
+assert.match(bundle, /navigateTo/);
+assert.match(bundle, /diagnostics/);
+assert.match(bundle, /sceneDiagnostics/);
+assert.match(bundle, /source\.trim/);
+assert.match(bundle, /playback\.range/);
+assert.match(bundle, /applyHandoffAlignment/);
+assert.match(bundle, /watchNativeProgress/);
+assert.match(bundle, /source\.reverseSrc/);
+assert.match(bundle, /stabilizeLanding/);
+assert.match(bundle, /settleFrames/);
+assert.match(bundle, /content\.enter/);
+assert.match(bundle, /--st-z-index/);
+assert.match(esm, /export \{ SectionTransition \}/);
+assert.match(css, /z-index:\s*var\(--st-z-index, 900\)/);
+assert.doesNotMatch(css, /2147483000/);
+assert.match(bundle, /canvas\.style\.width = "100%"/);
+assert.match(bundle, /canvas\.style\.height = "100%"/);
+assert.match(css, /\.st-scrub-track[\s\S]*?100dvh/);
+assert.match(css, /\.st-stage--scrub-sticky[\s\S]*?position:\s*sticky/);
+assert.doesNotMatch(css, /st-stage--scrub-playing/);
+
+const moduleEntry = await import("../dist/section-transition.mjs");
+assert.equal(moduleEntry.SectionTransition.version, "0.6.0");
+assert.equal(typeof moduleEntry.SectionTransition.useGSAP, "function");
+
+console.log("Smoke assertions passed.");

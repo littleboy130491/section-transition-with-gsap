@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>RUNNING</title>
+  <link rel="stylesheet" href="../dist/section-transition.css">
+  <style>
+    html { scroll-snap-type: y mandatory; }
+    body { margin: 0; }
+    section { height: 100vh; scroll-snap-align: start; display:grid; place-items:center; font:40px sans-serif; }
+    #a { background:#eee; } #b { background:#ddd; }
+  </style>
+</head>
+<body>
+  <section id="a" data-exit-transition="a-to-b"><div id="text-a">SOURCE TEXT</div></section>
+  <section id="b"><div id="text-b">TARGET TEXT</div></section>
+  <script src="../dist/section-transition.js"></script>
+  <script>
+    (async () => {
+      const px = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="%23999"/></svg>');
+      try {
+        const manager = await SectionTransition.init({
+          transitions: {
+            'a-to-b': {
+              source: { type: 'image', src: px },
+              scroll: { mode: 'auto', snap: 'auto', triggerThreshold: 1 },
+              playback: { duration: 20, enterFade: 0, exitFade: 20 },
+              preload: { deferUntilNear: false },
+              loading: { timeout: 1500 }
+            }
+          }
+        });
+        const a = document.querySelector('#a');
+        const b = document.querySelector('#b');
+        const rt = manager.runtimes[0];
+        const beforeTarget = Math.round(window.scrollY + b.getBoundingClientRect().top);
+        const expected = Math.round(window.innerHeight);
+        if (Math.abs(beforeTarget - expected) > 2) throw new Error(`target shifted: ${beforeTarget} vs ${expected}`);
+        if (rt.spacer.getBoundingClientRect().height !== 0) throw new Error('auto spacer is not zero height');
+        window.scrollTo(0, rt.driver.boundaryY(1));
+        await rt.requestAuto(1);
+        await new Promise(r => setTimeout(r, 150));
+        if (Math.abs(window.scrollY - rt.driver.targetY) > 2) throw new Error(`did not land on target: ${window.scrollY} vs ${rt.driver.targetY}`);
+        if (getComputedStyle(document.querySelector('#text-b')).visibility === 'hidden') throw new Error('target text hidden');
+        if (rt.stage.classList.contains('st-stage--auto-playing')) throw new Error('stage not restored after handoff');
+        document.title = 'PASS';
+        document.body.dataset.result = 'PASS';
+      } catch (e) {
+        document.title = 'FAIL';
+        document.body.dataset.result = 'FAIL:' + e.message;
+      }
+    })();
+  </script>
+</body>
+</html>
