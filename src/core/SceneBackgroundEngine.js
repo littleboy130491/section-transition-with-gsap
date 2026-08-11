@@ -42,6 +42,7 @@ export class SceneBackgroundEngine {
     this.destroyed = false;
     this.resizeScheduled = false;
     this.requestSerial = 0;
+    this.surfaceReady = false;
   }
 
   get enabled() {
@@ -112,6 +113,7 @@ export class SceneBackgroundEngine {
       this.scenes.push(scene);
       this.byElement.set(element, scene);
       this.byName.set(name, scene);
+      if (background) element.classList?.add?.("st-scene-managed");
     });
   }
 
@@ -245,13 +247,15 @@ export class SceneBackgroundEngine {
         }
       } else {
         const scene = this.currentScene;
-        this.loadScene(scene).then((image) => {
+        this.loadScene(scene, { priority: "high" }).then((image) => {
           if (
             !image || this.destroyed || this.activeTransition ||
             this.currentScene !== scene || this.currentVisual !== snapshot
           ) return;
           if (!this.drawCover(image, scene)) return;
           this.currentVisual = { source: image, fit: scene.fit, position: scene.position, type: "scene" };
+          this.activateSurfaceOwnership();
+          this.setSurfaceOwnership(scene, true);
           this.markOwned(scene);
           this.showLayer();
         }).catch(() => {});
@@ -306,6 +310,27 @@ export class SceneBackgroundEngine {
     scene.promoted = true;
   }
 
+  activateSurfaceOwnership() {
+    if (this.surfaceReady) return;
+    this.surfaceReady = true;
+    for (const scene of this.scenes) {
+      if (!scene?.background || this.failed.has(scene.name)) continue;
+      scene.element?.classList?.add?.("st-scene-surface-owned");
+    }
+  }
+
+  setSurfaceOwnership(scene, owned = true) {
+    if (!scene?.element || !scene.background) return;
+    scene.element.classList?.toggle?.("st-scene-surface-owned", !!owned);
+  }
+
+  releaseBackgroundOwnership(scene) {
+    if (!scene?.element) return;
+    scene.element.classList?.remove?.("st-scene-surface-owned");
+    scene.element.classList?.remove?.("st-scene-owned");
+    scene.owned = false;
+  }
+
   markOwned(scene) {
     if (!scene?.element || scene.owned) return;
     this.promoteContent(scene);
@@ -316,6 +341,8 @@ export class SceneBackgroundEngine {
   restoreOwned(scene) {
     if (!scene?.element) return;
     scene.element.classList.remove("st-scene-owned");
+    scene.element.classList.remove("st-scene-surface-owned");
+    scene.element.classList.remove("st-scene-managed");
     for (const saved of scene.contentLayers || []) {
       const layer = saved.element;
       layer?.classList?.remove?.("st-scene-content-layer");
@@ -372,7 +399,7 @@ export class SceneBackgroundEngine {
     });
   }
 
-  loadScene(scene) {
+  loadScene(scene, { priority = "auto" } = {}) {
     if (!scene?.background || this.destroyed) return Promise.resolve(null);
     if (this.cache.has(scene.name)) {
       const cached = this.cache.get(scene.name);
@@ -386,6 +413,7 @@ export class SceneBackgroundEngine {
       const image = new Image();
       if (scene.crossOrigin) image.crossOrigin = scene.crossOrigin;
       image.decoding = "async";
+      try { image.fetchPriority = priority; } catch (_) {}
       image.onload = async () => {
         if (this.destroyed) return resolve(null);
         try { await image.decode?.(); } catch (_) {}
@@ -412,7 +440,10 @@ export class SceneBackgroundEngine {
     const behind = Math.max(0, Number(this.options.preloadBehind) || 1);
     for (let offset = -behind; offset <= ahead; offset++) {
       const candidate = this.scenes[scene.index + offset];
-      if (candidate?.background) this.loadScene(candidate).catch(() => {});
+      if (candidate?.background) {
+        const priority = offset === 0 || offset === 1 ? "high" : "auto";
+        this.loadScene(candidate, { priority }).catch(() => {});
+      }
     }
   }
 
@@ -427,7 +458,7 @@ export class SceneBackgroundEngine {
     }
 
     const serial = ++this.requestSerial;
-    const image = await this.loadScene(scene);
+    const image = await this.loadScene(scene, { priority: "high" });
     if (this.destroyed || serial !== this.requestSerial || this.wantedScene !== scene) return false;
     if (this.activeTransition) {
       const sourceScene = this.sceneForElement(this.activeTransition.section);
@@ -437,15 +468,20 @@ export class SceneBackgroundEngine {
       if (scene !== sourceScene) return false;
     }
     if (!image) {
-      // Fail open: keep authored section styling visible if its managed
-      // background cannot be loaded.
-      if (this.currentScene !== scene) this.hideLayer();
+      // Fail open for this scene only. Once the persistent surface is active,
+      // managed scene roots are transparent so they cannot cover the canvas.
+      // If this particular authored background is unavailable, restore that
+      // section's own styling rather than exposing an empty surface.
+      this.releaseBackgroundOwnership(scene);
+      if (this.currentScene !== scene && !this.currentVisual) this.hideLayer();
       return false;
     }
 
     if (!this.drawCover(image, scene)) return false;
     this.currentScene = scene;
     this.currentVisual = { source: image, fit: scene.fit, position: scene.position, type: "scene" };
+    this.activateSurfaceOwnership();
+    this.setSurfaceOwnership(scene, true);
     this.markOwned(scene);
     this.showLayer();
     return true;
@@ -467,20 +503,22 @@ export class SceneBackgroundEngine {
       this.wantedScene = sourceScene;
       this.requestSerial += 1; // invalidate a pending target/static switch
       if (sourceScene.background && !this.cache.has(sourceScene.name)) {
-        this.loadScene(sourceScene).then((image) => {
+        this.loadScene(sourceScene, { priority: "high" }).then((image) => {
           if (!image || this.destroyed || this.activeTransition !== runtime) return;
           // Only establish the base if no valid visual is already retained.
           if (!this.currentVisual) {
             this.drawCover(image, sourceScene);
             this.currentVisual = { source: image, fit: sourceScene.fit, position: sourceScene.position, type: "scene" };
             this.currentScene = sourceScene;
+            this.activateSurfaceOwnership();
+            this.setSurfaceOwnership(sourceScene, true);
             this.markOwned(sourceScene);
           }
         }).catch(() => {});
       }
     }
     const targetScene = this.sceneForElement(runtime.targetSection?.());
-    if (targetScene?.background) this.loadScene(targetScene).catch(() => {});
+    if (targetScene?.background) this.loadScene(targetScene, { priority: "high" }).catch(() => {});
     this.showLayer();
   }
 
@@ -528,7 +566,11 @@ export class SceneBackgroundEngine {
         this.currentVisual = null;
       }
       this.currentScene = scene || this.currentScene;
-      if (scene) this.markOwned(scene);
+      this.activateSurfaceOwnership();
+      if (scene) {
+        this.setSurfaceOwnership(scene, true);
+        this.markOwned(scene);
+      }
       this.showLayer();
     } else if (scene) {
       this.showScene(scene, { force: true }).catch(() => {});
@@ -584,6 +626,7 @@ export class SceneBackgroundEngine {
   diagnostic() {
     return {
       enabled: !!this.layer,
+      surfaceReady: this.surfaceReady,
       scenes: this.scenes.map((scene) => ({
         name: scene.name,
         background: scene.background,
@@ -619,6 +662,7 @@ export class SceneBackgroundEngine {
     this.mediaHost = null;
     this.currentVisual = null;
     this.currentScene = null;
+    this.surfaceReady = false;
     this.activeTransition = null;
   }
 }

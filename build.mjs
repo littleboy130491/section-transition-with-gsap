@@ -21,6 +21,7 @@ const order = [
   "src/input/InputManager.js",
   "src/drivers/ScrubDriver.js",
   "src/drivers/ScrollTriggerDriver.js",
+  "src/drivers/SnapGlideController.js",
   "src/drivers/TakeoverDriver.js",
   "src/core/ContentAnimator.js",
   "src/core/GSAPContentTimeline.js",
@@ -44,7 +45,7 @@ const body = order
   .join("\n");
 
 const bundle = `/**
- * SectionTransition v0.6.0
+ * SectionTransition v0.6.3
  * Generated from /src by build.mjs. Do not hand-edit this file.
  */
 (function (global) {

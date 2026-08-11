@@ -3,6 +3,7 @@ import { FrameCache } from "../src/assets/FrameCache.js";
 import { AssetManager } from "../src/assets/AssetManager.js";
 import { TakeoverDriver } from "../src/drivers/TakeoverDriver.js";
 import { ScrollTriggerDriver } from "../src/drivers/ScrollTriggerDriver.js";
+import { SnapGlideController } from "../src/drivers/SnapGlideController.js";
 import { ScrubDriver } from "../src/drivers/ScrubDriver.js";
 import { VideoRenderer } from "../src/renderers/VideoRenderer.js";
 import { SequenceRenderer } from "../src/renderers/SequenceRenderer.js";
@@ -1437,6 +1438,94 @@ console.log("Unit assertions passed.");
   globalThis.document = previousDocument;
 }
 
+// Once the persistent surface has a drawable visual, every managed background
+// scene becomes transparent together. This prevents an incoming section's
+// authored background-color/image from covering the continuous canvas while
+// its own static endpoint is still warming.
+{
+  const classes = () => {
+    const set = new Set();
+    return {
+      set,
+      add(...names) { names.forEach((name) => set.add(name)); },
+      remove(...names) { names.forEach((name) => set.delete(name)); },
+      toggle(name, force) {
+        if (force === false) { set.delete(name); return false; }
+        if (force === true) { set.add(name); return true; }
+        if (set.has(name)) { set.delete(name); return false; }
+        set.add(name); return true;
+      },
+      contains(name) { return set.has(name); }
+    };
+  };
+  const a = { classList: classes() };
+  const b = { classList: classes() };
+  const c = { classList: classes() };
+  const engine = new SceneBackgroundEngine({}, {});
+  engine.scenes = [
+    { name: "a", background: "/a.webp", element: a },
+    { name: "b", background: "/b.webp", element: b },
+    { name: "content-only", background: null, element: c }
+  ];
+  engine.activateSurfaceOwnership();
+  assert.equal(engine.surfaceReady, true);
+  assert.equal(a.classList.contains("st-scene-surface-owned"), true);
+  assert.equal(b.classList.contains("st-scene-surface-owned"), true);
+  assert.equal(c.classList.contains("st-scene-surface-owned"), false);
+}
+
+// A scene that already failed preloading keeps its authored fallback when the
+// shared surface activates; successful retry can claim it later.
+{
+  const makeClassList = () => {
+    const set = new Set(["st-scene-owned"]);
+    return {
+      set,
+      add(name) { set.add(name); },
+      remove(...names) { names.forEach((name) => set.delete(name)); },
+      toggle(name, force) { if (force) set.add(name); else set.delete(name); },
+      contains(name) { return set.has(name); }
+    };
+  };
+  const element = { classList: makeClassList() };
+  const scene = { name: "failed", background: "/failed.webp", element, owned: true };
+  const engine = new SceneBackgroundEngine({}, {});
+  engine.scenes = [scene];
+  engine.failed.set(scene.name, { attempts: 1, retryAfter: Date.now() + 1000, error: new Error("404") });
+  engine.surfaceReady = false;
+  engine.activateSurfaceOwnership();
+  // activateSurfaceOwnership doesn't hide a scene already known to have failed.
+  assert.equal(element.classList.contains("st-scene-surface-owned"), false);
+  // Explicit fail-open releases both background ownership classes, preserving
+  // content promotion while allowing authored CSS to render again.
+  engine.releaseBackgroundOwnership(scene);
+  assert.equal(element.classList.contains("st-scene-surface-owned"), false);
+  assert.equal(element.classList.contains("st-scene-owned"), false);
+  assert.equal(scene.owned, false);
+}
+
+// Scene preloading prioritizes the current and immediately-next static
+// backgrounds, without promoting farther/behind assets to high priority.
+{
+  const engine = new SceneBackgroundEngine({}, { preloadAhead: 2, preloadBehind: 1 });
+  engine.scenes = [
+    { index: 0, name: "before", background: "/before.webp" },
+    { index: 1, name: "current", background: "/current.webp" },
+    { index: 2, name: "next", background: "/next.webp" },
+    { index: 3, name: "far", background: "/far.webp" }
+  ];
+  const seen = [];
+  engine.loadScene = async (scene, options) => { seen.push([scene.name, options?.priority]); return {}; };
+  engine.preloadAround(engine.scenes[1]);
+  await Promise.resolve();
+  assert.deepEqual(seen, [
+    ["before", "auto"],
+    ["current", "high"],
+    ["next", "high"],
+    ["far", "auto"]
+  ]);
+}
+
 // Missing scene backgrounds use bounded retry/backoff instead of issuing a new
 // request on every scroll/update preload pass.
 {
@@ -1768,8 +1857,9 @@ console.log("Unit assertions passed.");
   runtime.driver = driver;
   assert.equal(driver.mode(), "snap");
   assert.equal(driver.install(), true);
-  assert.equal(triggerVars.scrub, 0.08);
-  assert.deepEqual(triggerVars.snap.snapTo, [0, 1]);
+  assert.equal(triggerVars.scrub, true);
+  assert.equal(triggerVars.snap, false);
+  assert.equal(driver.measure().snapStrategy, "glide");
   assert.equal(driver.trigger.start, 100);
   assert.equal(driver.trigger.end, 900);
 
@@ -1785,8 +1875,8 @@ console.log("Unit assertions passed.");
   globalThis.document = previousDocument;
 }
 
-// In snap:auto mode, existing CSS scroll-snap remains the landing authority;
-// ScrollTrigger should not install a second competing snap animation.
+// Glide snap never installs ScrollTrigger's settle-after-scroll snap.
+// CSS snap is suppressed by SnapGlideController so there is one motion authority.
 {
   const cfg = normalizeOptions({ scroll: { mode: "snap", snap: "auto" } });
   const runtime = {
@@ -1795,6 +1885,123 @@ console.log("Unit assertions passed.");
   };
   const driver = new ScrollTriggerDriver(runtime, { gsap: {}, ScrollTrigger: {} });
   assert.equal(driver.snapValue(), false);
+}
+
+// Explicit settle strategy preserves legacy ScrollTrigger snap behavior.
+{
+  const cfg = normalizeOptions({
+    scroll: { mode: "snap", snap: true, snapStrategy: "settle", scrub: 0.08 }
+  });
+  const runtime = {
+    config: cfg,
+    manager: { documentSnapEnabled: () => false }
+  };
+  const driver = new ScrollTriggerDriver(runtime, { gsap: {}, ScrollTrigger: {} });
+  assert.equal(driver.scrubValue(), 0.08);
+  assert.deepEqual(driver.snapValue().snapTo, [0, 1]);
+}
+
+// Snap glide claims only an eligible boundary gesture and performs one GSAP
+// document-scroll tween. Away from boundaries native scrolling is untouched.
+{
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousComputed = globalThis.getComputedStyle;
+
+  const makeStyle = () => {
+    const values = new Map();
+    const priorities = new Map();
+    return {
+      getPropertyValue(name) { return values.get(name) || ""; },
+      getPropertyPriority(name) { return priorities.get(name) || ""; },
+      setProperty(name, value, priority = "") { values.set(name, value); priorities.set(name, priority); },
+      removeProperty(name) { values.delete(name); priorities.delete(name); }
+    };
+  };
+  const root = { style: makeStyle() };
+  const body = { style: makeStyle() };
+  const listeners = new Map();
+  globalThis.document = {
+    documentElement: root,
+    body,
+    addEventListener(type, fn) { listeners.set(type, fn); },
+    removeEventListener(type) { listeners.delete(type); }
+  };
+  globalThis.getComputedStyle = () => ({ overflowY: "visible", overflow: "visible" });
+  globalThis.window = {
+    scrollY: 100,
+    innerHeight: 800,
+    visualViewport: null,
+    scrollTo(_x, y) { this.scrollY = Number(y); }
+  };
+
+  let observerVars = null;
+  let updates = 0;
+  const ScrollTrigger = {
+    observe(vars) {
+      observerVars = vars;
+      return { kill() {} };
+    },
+    update() { updates++; }
+  };
+  let tweenCalls = 0;
+  const gsap = {
+    to(target, vars) {
+      tweenCalls++;
+      vars.onStart?.();
+      target.y = vars.y;
+      vars.onUpdate?.();
+      vars.onComplete?.();
+      return { kill() {} };
+    }
+  };
+
+  const cfg = normalizeOptions({ scroll: { mode: "snap", snapStrategy: "glide" } });
+  const runtime = {
+    destroyed: false,
+    config: cfg,
+    usesScrollTrigger: () => true,
+    normalizedScrollMode: () => "snap",
+    driver: { startValue: () => 100, endValue: () => 900 },
+    renderer: { prepareForDirection() {} }
+  };
+  const manager = { options: cfg, runtimes: [runtime] };
+  const controller = new SnapGlideController(manager, { gsap, ScrollTrigger });
+  assert.equal(controller.install(), true);
+  assert.equal(root.style.getPropertyValue("scroll-snap-type"), "none");
+
+  let prevented = 0;
+  observerVars.onChangeY({
+    deltaY: 120,
+    event: { type: "wheel", cancelable: true, target: null, preventDefault() { prevented++; } }
+  });
+  assert.equal(prevented, 1);
+  assert.equal(tweenCalls, 1);
+  assert.equal(globalThis.window.scrollY, 900);
+  assert.equal(updates > 0, true);
+
+  // End the first gesture session, then a reverse wheel gesture glides back.
+  observerVars.onStop();
+  observerVars.onChangeY({
+    deltaY: -120,
+    event: { type: "wheel", cancelable: true, target: null, preventDefault() { prevented++; } }
+  });
+  assert.equal(tweenCalls, 2);
+  assert.equal(globalThis.window.scrollY, 100);
+
+  observerVars.onStop();
+  globalThis.window.scrollY = 500;
+  observerVars.onChangeY({
+    deltaY: 120,
+    event: { type: "wheel", cancelable: true, target: null, preventDefault() { prevented++; } }
+  });
+  assert.equal(tweenCalls, 2); // no eligible boundary => no interception
+
+  controller.destroy();
+  assert.equal(root.style.getPropertyValue("scroll-snap-type"), "");
+  globalThis.window = previousWindow;
+  globalThis.document = previousDocument;
+  globalThis.getComputedStyle = previousComputed;
 }
 
 // New mode validation: takeover is explicit, and arbitrary scroll modes fail.
@@ -1927,4 +2134,171 @@ console.log("Unit assertions passed.");
   const runtime = { config: normalizeOptions({ scroll: { mode: "takeover" } }) };
   const content = new ContentAnimator(runtime);
   assert.equal(content.resolvedEnterTrigger(), "handoff");
+}
+
+// Fast-scroll scheduling prunes stale queued nearby work so the current and
+// projected frames get the next available decode slots.
+{
+  const cfg = normalizeOptions({
+    preload: {
+      maxConcurrent: 1,
+      ahead: 4,
+      behind: 2,
+      motion: {
+        mediumVelocity: 100,
+        fastVelocity: 200,
+        extremeVelocity: 300,
+        preemptStale: false,
+        keepRadius: 3
+      }
+    }
+  });
+  const assets = new AssetManager(
+    { type: "sequence", src: "/f-{frame}.webp", count: 10 },
+    cfg
+  );
+  let releaseFirst;
+  let first = true;
+  assets.decodeUrl = async () => {
+    if (first) {
+      first = false;
+      await new Promise((resolve) => { releaseFirst = resolve; });
+    }
+    return { width: 1, height: 1 };
+  };
+
+  const active = assets.load(0, "nearby").catch(() => null);
+  assets.load(1, "nearby").catch(() => null);
+  assets.load(2, "nearby").catch(() => null);
+  assets.load(3, "progressive").catch(() => null);
+  assets.scheduleMotion(8, { direction: 1, velocity: 250, projectedIndex: 9 });
+
+  const queued = assets.queue.map((job) => ({ index: job.index, priority: job.priority }));
+  assert.equal(queued.some((job) => job.index === 1 || job.index === 2 || job.index === 3), false);
+  assert.equal(queued.some((job) => job.index === 8 && job.priority === "requested"), true);
+  assert.equal(queued.some((job) => job.index === 9), true);
+
+  releaseFirst();
+  await active;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assets.destroy();
+}
+
+// Adaptive sequence stepping drops visual frames only while scroll velocity is
+// high; slow scrubbing returns to the exact frame immediately.
+{
+  const previousWindow = globalThis.window;
+  globalThis.window = { devicePixelRatio: 1, innerWidth: 100, innerHeight: 100 };
+  const runtime = {
+    progress: 0.53,
+    stage: { getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+    requestRender() {}, debug() {}, reportError() {}, destroyed: false
+  };
+  const cfg = normalizeOptions({
+    preload: {
+      motion: {
+        mediumVelocity: 100,
+        fastVelocity: 200,
+        extremeVelocity: 300,
+        maxStep: 4
+      }
+    }
+  });
+  const renderer = new SequenceRenderer(
+    runtime,
+    { type: "sequence", src: "/f-{frame}.webp", count: 101 },
+    cfg
+  );
+  renderer.updateMotion({ direction: 1, velocity: 350, projectedProgress: 0.7 });
+  assert.equal(renderer.motion.step, 4);
+  assert.equal(renderer.displayIndex(0.53), 52);
+  renderer.updateMotion({ direction: 1, velocity: 0, projectedProgress: 0.53 });
+  assert.equal(renderer.motion.step, 1);
+  assert.equal(renderer.displayIndex(0.53), 53);
+  renderer.assetManager.destroy();
+  globalThis.window = previousWindow;
+}
+
+// If the nearest cached frame is the stale frame already displayed, fast motion
+// may advance to a modest directionally-correct predictive frame instead of
+// visibly freezing in place.
+{
+  const cfg = normalizeOptions({});
+  const assets = new AssetManager(
+    { type: "sequence", src: "/f-{frame}.webp", count: 100 },
+    cfg
+  );
+  assets.cache.set(40, { width: 1, height: 1 });
+  assets.cache.set(52, { width: 1, height: 1 });
+  const best = assets.bestCached(45, {
+    direction: 1,
+    preferMovement: true,
+    paintedIndex: 40,
+    maxLead: 8
+  });
+  assert.equal(best.index, 52);
+  assets.destroy();
+}
+
+// ScrollTrigger velocity is projected into future progress and passed to the
+// renderer's media scheduler; no separate touch/momentum detector is needed.
+{
+  const primes = [];
+  const cfg = normalizeOptions({ preload: { motion: { predictionMs: 120 } } });
+  const runtime = {
+    config: cfg,
+    destroyed: false,
+    progress: 0,
+    targetProgress: 0,
+    renderer: {
+      prime(progress, motion) { primes.push({ progress, motion }); },
+      prepareForDirection() {}
+    }
+  };
+  const driver = new ScrollTriggerDriver(runtime, { gsap: {}, ScrollTrigger: {} });
+  driver.geometry = { startY: 0, endY: 1000 };
+  driver.onScrollTriggerUpdate({
+    direction: 1,
+    progress: 0.5,
+    start: 0,
+    end: 1000,
+    getVelocity: () => 2000
+  });
+  assert.equal(runtime.targetProgress, 0.5);
+  assert.equal(primes.at(-1).motion.velocity, 2000);
+  assert.ok(Math.abs(primes.at(-1).motion.projectedProgress - 0.74) < 1e-9);
+}
+
+// After a fast direct scrub stops, motion state decays back to exact frame
+// selection even when ScrollTrigger scrub=true has no numerical scrub callback.
+{
+  const primes = [];
+  let renderRequests = 0;
+  const cfg = normalizeOptions({ preload: { motion: { predictionMs: 120, settleMs: 5 } } });
+  const runtime = {
+    config: cfg,
+    destroyed: false,
+    progress: 0,
+    targetProgress: 0,
+    renderer: {
+      prime(progress, motion) { primes.push({ progress, motion: { ...motion } }); },
+      prepareForDirection() {}
+    },
+    requestRender() { renderRequests++; }
+  };
+  const driver = new ScrollTriggerDriver(runtime, { gsap: {}, ScrollTrigger: {} });
+  driver.geometry = { startY: 0, endY: 1000 };
+  driver.onScrollTriggerUpdate({
+    direction: 1,
+    progress: 0.6,
+    start: 0,
+    end: 1000,
+    getVelocity: () => 2200
+  });
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  assert.equal(driver.motion.velocity, 0);
+  assert.equal(driver.motion.projectedProgress, 0.6);
+  assert.equal(primes.at(-1).motion.velocity, 0);
+  assert.equal(renderRequests > 0, true);
+  driver.destroy();
 }

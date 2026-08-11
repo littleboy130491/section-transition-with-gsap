@@ -5,6 +5,7 @@ import { InputManager } from "../input/InputManager.js";
 import { ScrollLockManager } from "../input/ScrollLockManager.js";
 import { SceneBackgroundEngine } from "./SceneBackgroundEngine.js";
 import { resolveGSAP } from "./GSAPAdapter.js";
+import { SnapGlideController } from "../drivers/SnapGlideController.js";
 
 export class Manager {
   constructor(options) {
@@ -21,6 +22,7 @@ export class Manager {
     this.scrollAdapter = resolveGSAP(options);
     this.sceneEngine = new SceneBackgroundEngine(this, options.scene || {});
     this.autoOwner = null;
+    this.snapGlide = null;
     this.destroyed = false;
 
     this.onScroll = this.onScroll.bind(this);
@@ -211,6 +213,20 @@ export class Manager {
     this.installLayoutObservers();
     this.installPreloadObserver();
     try { this.scrollAdapter?.ScrollTrigger?.refresh?.(); } catch (_) {}
+
+    const needsSnapGlide = this.runtimes.some((runtime) =>
+      runtime.usesScrollTrigger?.() &&
+      runtime.normalizedScrollMode?.() === "snap" &&
+      runtime.config.scroll?.snap !== false &&
+      runtime.config.scroll?.snapStrategy !== "settle"
+    );
+    if (needsSnapGlide) {
+      this.snapGlide = new SnapGlideController(this, this.scrollAdapter);
+      this.snapGlide.install();
+      // CSS scroll-snap may have been suppressed by the glide controller.
+      // Refresh once more so ScrollTrigger measurements reflect the final style.
+      try { this.scrollAdapter?.ScrollTrigger?.refresh?.(); } catch (_) {}
+    }
 
     if (this.options.layout.refreshOnFonts && document.fonts?.ready) {
       document.fonts.ready.then(() => this.refresh()).catch(() => {});
@@ -406,6 +422,10 @@ export class Manager {
     return this.sceneEngine?.diagnostic?.() || null;
   }
 
+  snapDiagnostics() {
+    return this.snapGlide?.diagnostic?.() || null;
+  }
+
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -417,6 +437,8 @@ export class Manager {
     window.visualViewport?.removeEventListener?.("resize", this.onResize);
     document.removeEventListener("visibilitychange", this.onVisibility);
     this.input?.detach?.();
+    this.snapGlide?.destroy?.();
+    this.snapGlide = null;
     this.resizeObserver?.disconnect();
     this.intersectionObservers.forEach((observer) => observer.disconnect());
     this.intersectionObservers = [];
@@ -425,6 +447,7 @@ export class Manager {
     this.runtimes.forEach((runtime) => runtime.destroy());
     this.runtimes = [];
     this.autoOwner = null;
+    this.snapGlide = null;
     this.sceneEngine.destroy();
 
     // Last-resort unlock in case third-party code interrupted runtime cleanup.

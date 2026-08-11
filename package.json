@@ -1,6 +1,6 @@
 {
   "name": "section-transition",
-  "version": "0.6.0",
+  "version": "0.6.3",
   "description": "Scene-aware section transitions powered by GSAP ScrollTrigger, with bounded sequence caching and persistent canvas backgrounds.",
   "main": "dist/section-transition.mjs",
   "scripts": {

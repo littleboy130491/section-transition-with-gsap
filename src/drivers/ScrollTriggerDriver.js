@@ -24,6 +24,13 @@ export class ScrollTriggerDriver {
     this.geometry = null;
     this.installed = false;
     this.lastPrime = null;
+    this.motion = {
+      direction: 1,
+      velocity: 0,
+      rawProgress: 0,
+      projectedProgress: 0
+    };
+    this.motionSettleTimer = 0;
   }
 
   mode() {
@@ -92,6 +99,9 @@ export class ScrollTriggerDriver {
   }
 
   scrubValue() {
+    // Glide snap owns smoothing through the single document-scroll tween, so
+    // media must follow that real scroll position exactly with no second catch-up.
+    if (this.mode() === "snap" && this.runtime.config.scroll.snapStrategy !== "settle") return true;
     const configured = this.runtime.config.scroll.scrub;
     // Primary ScrollTrigger modes are always progress-linked. `false` would
     // turn the attached GSAP timeline into an ordinary toggle animation, which
@@ -110,6 +120,9 @@ export class ScrollTriggerDriver {
 
   snapValue() {
     if (this.mode() !== "snap") return false;
+    // v0.6.3 default: snapping is a one-phase Observer-driven document glide.
+    // Keep ScrollTrigger snap only as an explicit compatibility strategy.
+    if (this.runtime.config.scroll.snapStrategy !== "settle") return false;
     const configured = this.runtime.config.scroll.snap;
     if (configured === false) return false;
     if (configured === "auto" && this.runtime.manager.documentSnapEnabled?.()) {
@@ -175,6 +188,7 @@ export class ScrollTriggerDriver {
       fastScrollEnd: this.runtime.config.scroll.fastScrollEnd ?? false,
       preventOverlaps: this.runtime.config.scroll.preventOverlaps || false,
       onUpdate: (self) => this.onScrollTriggerUpdate(self),
+      onScrubComplete: (self) => this.onScrubComplete(self),
       onRefresh: (self) => this.onRefresh(self),
       onEnter: (self) => this.onBoundary("enter", self),
       onEnterBack: (self) => this.onBoundary("enterBack", self),
@@ -192,7 +206,7 @@ export class ScrollTriggerDriver {
     this.trigger = this.ScrollTrigger.create(vars);
     this.installed = true;
     this.measure();
-    this.prime(0);
+    this.prime(0, this.motion, true);
     return true;
   }
 
@@ -213,14 +227,46 @@ export class ScrollTriggerDriver {
     }
   }
 
+  scheduleMotionSettle(rawProgress, direction) {
+    if (this.motionSettleTimer) clearTimeout(this.motionSettleTimer);
+    const delay = Math.max(0, Number(this.runtime.config.preload?.motion?.settleMs) || 120);
+    this.motionSettleTimer = setTimeout(() => {
+      this.motionSettleTimer = 0;
+      if (this.runtime.destroyed) return;
+      const progress = clamp(Number(rawProgress) || 0);
+      this.motion = { direction, velocity: 0, rawProgress: progress, projectedProgress: progress };
+      this.prime(progress, this.motion, true);
+      this.runtime.requestRender?.();
+    }, delay);
+  }
+
   onScrollTriggerUpdate(self) {
     const direction = self?.direction < 0 ? -1 : 1;
     if (direction !== this.lastDirection) {
       this.lastDirection = direction;
       try { this.runtime.renderer?.prepareForDirection?.(direction); } catch (_) {}
     }
-    this.runtime.targetProgress = clamp(Number(self?.progress) || 0);
-    this.prime(this.runtime.targetProgress);
+
+    const rawProgress = clamp(Number(self?.progress) || 0);
+    const velocity = Number(self?.getVelocity?.()) || 0;
+    const span = Math.max(1, Math.abs(Number(self?.end) - Number(self?.start)) ||
+      Math.abs((this.geometry?.endY || 1) - (this.geometry?.startY || 0)) || 1);
+    const predictionMs = Math.max(0, Number(this.runtime.config.preload?.motion?.predictionMs) || 120);
+    const projectedProgress = clamp(rawProgress + (velocity / span) * (predictionMs / 1000));
+
+    this.motion = { direction, velocity, rawProgress, projectedProgress };
+    this.runtime.targetProgress = rawProgress;
+    this.prime(rawProgress, this.motion);
+    this.scheduleMotionSettle(rawProgress, direction);
+  }
+
+  onScrubComplete(self) {
+    if (this.motionSettleTimer) clearTimeout(this.motionSettleTimer);
+    this.motionSettleTimer = 0;
+    const rawProgress = clamp(Number(self?.progress ?? this.runtime.targetProgress) || 0);
+    const direction = self?.direction < 0 ? -1 : this.lastDirection;
+    this.motion = { direction, velocity: 0, rawProgress, projectedProgress: rawProgress };
+    this.prime(rawProgress, this.motion, true);
   }
 
   applyTimelineProgress() {
@@ -240,11 +286,13 @@ export class ScrollTriggerDriver {
     catch (_) { return false; }
   }
 
-  prime(progress) {
+  prime(progress, motion = this.motion, force = false) {
     const normalized = clamp(progress);
-    if (this.lastPrime != null && Math.abs(this.lastPrime - normalized) < 0.0001) return;
-    this.lastPrime = normalized;
-    try { this.runtime.renderer?.prime?.(normalized); } catch (_) {}
+    const tier = this.runtime.renderer?.assetManager?.motionTier?.(motion?.velocity) ?? 0;
+    const signature = `${normalized.toFixed(4)}:${motion?.direction || 1}:${tier}:${Number(motion?.projectedProgress || 0).toFixed(3)}`;
+    if (!force && this.lastPrime === signature) return;
+    this.lastPrime = signature;
+    try { this.runtime.renderer?.prime?.(normalized, motion); } catch (_) {}
   }
 
   activateOverlay() {
@@ -329,6 +377,7 @@ export class ScrollTriggerDriver {
       endY: Number.isFinite(end) ? end : this.endValue(),
       scrub: this.scrubValue(),
       snap: !!this.snapValue(),
+      snapStrategy: this.mode() === "snap" ? (this.runtime.config.scroll.snapStrategy || "glide") : null,
       pin: !!this.pinValue()
     };
     return this.geometry;
@@ -347,6 +396,9 @@ export class ScrollTriggerDriver {
       progress: Number(this.runtime.progress.toFixed(3)),
       rawProgress: Number((this.trigger?.progress || 0).toFixed?.(3) || 0),
       direction: this.lastDirection,
+      velocity: Math.round(this.motion.velocity || 0),
+      projectedProgress: Number((this.motion.projectedProgress || 0).toFixed(3)),
+      adaptiveStep: this.runtime.renderer?.motion?.step || 1,
       overlayWanted: this.overlayWanted,
       overlayActive: this.overlayActive,
       visualReady: this.rendererHasDrawable({ exact: false }),
@@ -359,6 +411,8 @@ export class ScrollTriggerDriver {
   }
 
   destroy() {
+    if (this.motionSettleTimer) clearTimeout(this.motionSettleTimer);
+    this.motionSettleTimer = 0;
     this.overlayWanted = false;
     this.deactivateOverlay();
     try { this.trigger?.kill?.(true); } catch (_) {}

@@ -1,5 +1,5 @@
 /**
- * SectionTransition v0.6.0
+ * SectionTransition v0.6.3
  * Generated from /src by build.mjs. Do not hand-edit this file.
  */
 (function (global) {
@@ -121,7 +121,20 @@ const DEFAULTS = {
     scrubRange: "sections",  // "sections" | "distance"
     scrubEngine: "scene",     // legacy compatibility: "auto"|"scene"|"sticky"|"legacy"
     reversible: true,
-    snap: "auto",             // snap mode: true|false|"auto"|ScrollTrigger snap object
+    snap: "auto",             // snap mode enabled unless false; "auto" is kept for compatibility
+    snapStrategy: "glide",     // "glide" (Observer + one GSAP scroll tween) | "settle" (legacy ScrollTrigger snap)
+    snapGlide: {
+      type: "wheel,touch",
+      inputTolerance: 8,
+      dragMinimum: 6,
+      boundaryTolerance: 18,
+      duration: { min: 0.42, max: 0.72 },
+      ease: "power2.inOut",
+      onStopDelay: 0.18,
+      disableCssSnap: true,
+      keyboard: true,
+      ignore: "input,textarea,select,button,[contenteditable='true'],[data-st-native-scroll]"
+    },
     pin: false,               // optional ScrollTrigger pin target/boolean
     pinSpacing: true,
     pinReparent: false,
@@ -223,7 +236,24 @@ const DEFAULTS = {
     intersectionMargin: "150% 0px",
     deferUntilNear: true,
     readyFrames: 8,
-    maxConcurrent: 4
+    maxConcurrent: 4,
+
+    // Sequence-only fast-scroll scheduler. Scroll itself stays native; these
+    // options only decide which decoded frames get scarce network/decode slots.
+    motion: {
+      enabled: true,
+      predictionMs: 120,
+      settleMs: 120,
+      mediumVelocity: 900,
+      fastVelocity: 1800,
+      extremeVelocity: 2800,
+      adaptiveFrames: true,
+      maxStep: 4,
+      pruneStale: true,
+      preemptStale: true,
+      keepRadius: 12,
+      preemptDistance: 16
+    }
   },
 
   cache: {
@@ -368,12 +398,47 @@ function validateTransitionConfig(name, cfg) {
     problems.push("preload.maxConcurrent must be >= 1");
   }
 
+  const motion = cfg?.preload?.motion || {};
+  if (!Number.isFinite(motion.predictionMs) || motion.predictionMs < 0 || motion.predictionMs > 1000) {
+    problems.push("preload.motion.predictionMs must be between 0 and 1000ms");
+  }
+  if (!Number.isFinite(motion.settleMs) || motion.settleMs < 0 || motion.settleMs > 1000) {
+    problems.push("preload.motion.settleMs must be between 0 and 1000ms");
+  }
+  for (const [key, min] of [["mediumVelocity", 1], ["fastVelocity", 1], ["extremeVelocity", 1]]) {
+    if (!Number.isFinite(motion[key]) || motion[key] < min) {
+      problems.push(`preload.motion.${key} must be >= ${min}`);
+    }
+  }
+  if (
+    Number.isFinite(motion.mediumVelocity) &&
+    Number.isFinite(motion.fastVelocity) &&
+    Number.isFinite(motion.extremeVelocity) &&
+    !(motion.mediumVelocity <= motion.fastVelocity && motion.fastVelocity <= motion.extremeVelocity)
+  ) {
+    problems.push("preload.motion velocity thresholds must be ordered medium <= fast <= extreme");
+  }
+  if (!Number.isInteger(motion.maxStep) || motion.maxStep < 1 || motion.maxStep > 12) {
+    problems.push("preload.motion.maxStep must be an integer between 1 and 12");
+  }
+  if (!Number.isFinite(motion.keepRadius) || motion.keepRadius < 1) {
+    problems.push("preload.motion.keepRadius must be >= 1");
+  }
+  if (!Number.isFinite(motion.preemptDistance) || motion.preemptDistance < 1) {
+    problems.push("preload.motion.preemptDistance must be >= 1");
+  }
+
   if (!Number.isFinite(cfg?.loading?.timeout) || cfg.loading.timeout < 1000) {
     problems.push("loading.timeout must be >= 1000ms");
   }
 
   if (!Number.isFinite(cfg?.scroll?.triggerThreshold) || cfg.scroll.triggerThreshold < 1) {
     problems.push("scroll.triggerThreshold must be >= 1");
+  }
+
+  const snapStrategy = cfg?.scroll?.snapStrategy;
+  if (!(snapStrategy === "glide" || snapStrategy === "settle")) {
+    problems.push('scroll.snapStrategy must be "glide" or "settle"');
   }
 
   const snap = cfg?.scroll?.snap;
@@ -676,6 +741,7 @@ class SceneBackgroundEngine {
     this.destroyed = false;
     this.resizeScheduled = false;
     this.requestSerial = 0;
+    this.surfaceReady = false;
   }
 
   get enabled() {
@@ -746,6 +812,7 @@ class SceneBackgroundEngine {
       this.scenes.push(scene);
       this.byElement.set(element, scene);
       this.byName.set(name, scene);
+      if (background) element.classList?.add?.("st-scene-managed");
     });
   }
 
@@ -879,13 +946,15 @@ class SceneBackgroundEngine {
         }
       } else {
         const scene = this.currentScene;
-        this.loadScene(scene).then((image) => {
+        this.loadScene(scene, { priority: "high" }).then((image) => {
           if (
             !image || this.destroyed || this.activeTransition ||
             this.currentScene !== scene || this.currentVisual !== snapshot
           ) return;
           if (!this.drawCover(image, scene)) return;
           this.currentVisual = { source: image, fit: scene.fit, position: scene.position, type: "scene" };
+          this.activateSurfaceOwnership();
+          this.setSurfaceOwnership(scene, true);
           this.markOwned(scene);
           this.showLayer();
         }).catch(() => {});
@@ -940,6 +1009,27 @@ class SceneBackgroundEngine {
     scene.promoted = true;
   }
 
+  activateSurfaceOwnership() {
+    if (this.surfaceReady) return;
+    this.surfaceReady = true;
+    for (const scene of this.scenes) {
+      if (!scene?.background || this.failed.has(scene.name)) continue;
+      scene.element?.classList?.add?.("st-scene-surface-owned");
+    }
+  }
+
+  setSurfaceOwnership(scene, owned = true) {
+    if (!scene?.element || !scene.background) return;
+    scene.element.classList?.toggle?.("st-scene-surface-owned", !!owned);
+  }
+
+  releaseBackgroundOwnership(scene) {
+    if (!scene?.element) return;
+    scene.element.classList?.remove?.("st-scene-surface-owned");
+    scene.element.classList?.remove?.("st-scene-owned");
+    scene.owned = false;
+  }
+
   markOwned(scene) {
     if (!scene?.element || scene.owned) return;
     this.promoteContent(scene);
@@ -950,6 +1040,8 @@ class SceneBackgroundEngine {
   restoreOwned(scene) {
     if (!scene?.element) return;
     scene.element.classList.remove("st-scene-owned");
+    scene.element.classList.remove("st-scene-surface-owned");
+    scene.element.classList.remove("st-scene-managed");
     for (const saved of scene.contentLayers || []) {
       const layer = saved.element;
       layer?.classList?.remove?.("st-scene-content-layer");
@@ -1006,7 +1098,7 @@ class SceneBackgroundEngine {
     });
   }
 
-  loadScene(scene) {
+  loadScene(scene, { priority = "auto" } = {}) {
     if (!scene?.background || this.destroyed) return Promise.resolve(null);
     if (this.cache.has(scene.name)) {
       const cached = this.cache.get(scene.name);
@@ -1020,6 +1112,7 @@ class SceneBackgroundEngine {
       const image = new Image();
       if (scene.crossOrigin) image.crossOrigin = scene.crossOrigin;
       image.decoding = "async";
+      try { image.fetchPriority = priority; } catch (_) {}
       image.onload = async () => {
         if (this.destroyed) return resolve(null);
         try { await image.decode?.(); } catch (_) {}
@@ -1046,7 +1139,10 @@ class SceneBackgroundEngine {
     const behind = Math.max(0, Number(this.options.preloadBehind) || 1);
     for (let offset = -behind; offset <= ahead; offset++) {
       const candidate = this.scenes[scene.index + offset];
-      if (candidate?.background) this.loadScene(candidate).catch(() => {});
+      if (candidate?.background) {
+        const priority = offset === 0 || offset === 1 ? "high" : "auto";
+        this.loadScene(candidate, { priority }).catch(() => {});
+      }
     }
   }
 
@@ -1061,7 +1157,7 @@ class SceneBackgroundEngine {
     }
 
     const serial = ++this.requestSerial;
-    const image = await this.loadScene(scene);
+    const image = await this.loadScene(scene, { priority: "high" });
     if (this.destroyed || serial !== this.requestSerial || this.wantedScene !== scene) return false;
     if (this.activeTransition) {
       const sourceScene = this.sceneForElement(this.activeTransition.section);
@@ -1071,15 +1167,20 @@ class SceneBackgroundEngine {
       if (scene !== sourceScene) return false;
     }
     if (!image) {
-      // Fail open: keep authored section styling visible if its managed
-      // background cannot be loaded.
-      if (this.currentScene !== scene) this.hideLayer();
+      // Fail open for this scene only. Once the persistent surface is active,
+      // managed scene roots are transparent so they cannot cover the canvas.
+      // If this particular authored background is unavailable, restore that
+      // section's own styling rather than exposing an empty surface.
+      this.releaseBackgroundOwnership(scene);
+      if (this.currentScene !== scene && !this.currentVisual) this.hideLayer();
       return false;
     }
 
     if (!this.drawCover(image, scene)) return false;
     this.currentScene = scene;
     this.currentVisual = { source: image, fit: scene.fit, position: scene.position, type: "scene" };
+    this.activateSurfaceOwnership();
+    this.setSurfaceOwnership(scene, true);
     this.markOwned(scene);
     this.showLayer();
     return true;
@@ -1101,20 +1202,22 @@ class SceneBackgroundEngine {
       this.wantedScene = sourceScene;
       this.requestSerial += 1; // invalidate a pending target/static switch
       if (sourceScene.background && !this.cache.has(sourceScene.name)) {
-        this.loadScene(sourceScene).then((image) => {
+        this.loadScene(sourceScene, { priority: "high" }).then((image) => {
           if (!image || this.destroyed || this.activeTransition !== runtime) return;
           // Only establish the base if no valid visual is already retained.
           if (!this.currentVisual) {
             this.drawCover(image, sourceScene);
             this.currentVisual = { source: image, fit: sourceScene.fit, position: sourceScene.position, type: "scene" };
             this.currentScene = sourceScene;
+            this.activateSurfaceOwnership();
+            this.setSurfaceOwnership(sourceScene, true);
             this.markOwned(sourceScene);
           }
         }).catch(() => {});
       }
     }
     const targetScene = this.sceneForElement(runtime.targetSection?.());
-    if (targetScene?.background) this.loadScene(targetScene).catch(() => {});
+    if (targetScene?.background) this.loadScene(targetScene, { priority: "high" }).catch(() => {});
     this.showLayer();
   }
 
@@ -1162,7 +1265,11 @@ class SceneBackgroundEngine {
         this.currentVisual = null;
       }
       this.currentScene = scene || this.currentScene;
-      if (scene) this.markOwned(scene);
+      this.activateSurfaceOwnership();
+      if (scene) {
+        this.setSurfaceOwnership(scene, true);
+        this.markOwned(scene);
+      }
       this.showLayer();
     } else if (scene) {
       this.showScene(scene, { force: true }).catch(() => {});
@@ -1218,6 +1325,7 @@ class SceneBackgroundEngine {
   diagnostic() {
     return {
       enabled: !!this.layer,
+      surfaceReady: this.surfaceReady,
       scenes: this.scenes.map((scene) => ({
         name: scene.name,
         background: scene.background,
@@ -1253,6 +1361,7 @@ class SceneBackgroundEngine {
     this.mediaHost = null;
     this.currentVisual = null;
     this.currentScene = null;
+    this.surfaceReady = false;
     this.activeTransition = null;
   }
 }
@@ -1328,11 +1437,12 @@ class FrameCache {
 
 
 const PRIORITY = Object.freeze({
-  critical: 0,
-  requested: 1,
-  nearby: 2,
-  progressive: 3,
-  normal: 4
+  requested: 0,
+  predictive: 1,
+  critical: 2,
+  nearby: 3,
+  progressive: 4,
+  normal: 5
 });
 
 function abortError(message = "Aborted") {
@@ -1364,6 +1474,8 @@ class AssetManager {
     this.idleIds = new Set();
     this.controllers = new Map();
     this.queue = [];
+    this.queuedJobs = new Map();
+    this.activeJobs = new Map();
     this.activeCount = 0;
     this.sequence = 0;
     this.destroyed = false;
@@ -1481,7 +1593,19 @@ class AssetManager {
     const cached = this.cache.get(index);
     if (cached) return Promise.resolve(cached);
 
-    if (this.inflight.has(index)) return this.inflight.get(index);
+    if (this.inflight.has(index)) {
+      // A fast fling may turn a formerly-low-priority nearby request into the
+      // exact frame the user needs now. Promote queued work in place instead of
+      // enqueueing a duplicate request. Active requests are left alone.
+      const queued = this.queuedJobs.get(index);
+      const nextRank = PRIORITY[priority] ?? PRIORITY.normal;
+      if (queued && nextRank < queued.rank) {
+        queued.priority = priority;
+        queued.rank = nextRank;
+        this.pump();
+      }
+      return this.inflight.get(index);
+    }
 
     const gatedError = this.failureGate(index);
     if (gatedError) return Promise.reject(gatedError);
@@ -1494,17 +1618,163 @@ class AssetManager {
     });
 
     this.inflight.set(index, promise);
-    this.queue.push({
+    const job = {
       index,
       priority,
       rank: PRIORITY[priority] ?? PRIORITY.normal,
       sequence: this.sequence++,
       resolve: resolveJob,
       reject: rejectJob
-    });
+    };
+    this.queue.push(job);
+    this.queuedJobs.set(index, job);
     this.pump();
 
     return promise;
+  }
+
+  motionConfig() {
+    return this.config.preload?.motion || {};
+  }
+
+  motionTier(velocity = 0) {
+    const cfg = this.motionConfig();
+    const speed = Math.abs(Number(velocity) || 0);
+    const medium = Math.max(1, Number(cfg.mediumVelocity) || 900);
+    const fast = Math.max(medium, Number(cfg.fastVelocity) || 1800);
+    const extreme = Math.max(fast, Number(cfg.extremeVelocity) || 2800);
+    if (speed >= extreme) return 3;
+    if (speed >= fast) return 2;
+    if (speed >= medium) return 1;
+    return 0;
+  }
+
+  cancelQueued(job, reason = "Superseded") {
+    if (!job || !this.queuedJobs.has(job.index)) return false;
+    const pos = this.queue.indexOf(job);
+    if (pos >= 0) this.queue.splice(pos, 1);
+    this.queuedJobs.delete(job.index);
+    this.inflight.delete(job.index);
+    job.reject(abortError(reason));
+    return true;
+  }
+
+  pruneMotionQueue(targetIndex, projectedIndex, direction, keepSet = new Set()) {
+    const cfg = this.motionConfig();
+    if (cfg.pruneStale === false) return 0;
+
+    const radius = Math.max(3, Number(cfg.keepRadius) || Math.max(6, this.config.preload?.ahead || 12));
+    const lo = Math.max(0, Math.min(targetIndex, projectedIndex) - radius);
+    const hi = Math.min(this.source.count - 1, Math.max(targetIndex, projectedIndex) + radius);
+    let removed = 0;
+
+    for (const job of [...this.queue]) {
+      // Exact requested frames are never discarded. Startup critical safety
+      // frames are lower priority than interaction, but remain queued so a
+      // fast fling cannot destroy the coarse fallback skeleton entirely.
+      if (job.priority === "critical" || job.rank <= PRIORITY.requested || keepSet.has(job.index)) continue;
+      const inWindow = job.index >= lo && job.index <= hi;
+      const directionallyUseful = direction > 0
+        ? job.index >= targetIndex - 1
+        : direction < 0
+          ? job.index <= targetIndex + 1
+          : true;
+      if (inWindow && directionallyUseful) continue;
+      if (this.cancelQueued(job, "Superseded by fast scroll")) removed++;
+    }
+    return removed;
+  }
+
+  preemptStaleActive(targetIndex, direction, velocity, keepSet = new Set()) {
+    const cfg = this.motionConfig();
+    if (cfg.preemptStale === false || this.motionTier(velocity) < 3) return false;
+    const maxConcurrent = Math.max(1, this.config.preload.maxConcurrent || 4);
+    if (this.activeCount < maxConcurrent || !this.queuedJobs.has(targetIndex)) return false;
+
+    const staleDistance = Math.max(8, Number(cfg.preemptDistance) || Math.max(12, this.config.preload?.ahead || 12));
+    let candidate = null;
+    let candidateDistance = -1;
+    for (const active of this.activeJobs.values()) {
+      const job = active.job;
+      if (!job || job.rank < PRIORITY.critical || keepSet.has(job.index)) continue;
+      const distance = Math.abs(job.index - targetIndex);
+      const lowPriority = job.rank >= PRIORITY.nearby;
+      const veryStaleCritical = job.priority === "critical" && distance > staleDistance * 2;
+      if (!lowPriority && !veryStaleCritical) continue;
+      const behind = direction > 0
+        ? job.index < targetIndex - staleDistance
+        : direction < 0
+          ? job.index > targetIndex + staleDistance
+          : distance > staleDistance;
+      if (!behind || distance <= candidateDistance) continue;
+      candidate = active;
+      candidateDistance = distance;
+    }
+
+    if (!candidate?.controller) return false;
+    try { candidate.controller.abort(); } catch (_) { return false; }
+    return true;
+  }
+
+  scheduleMotion(index, motion = {}) {
+    if (this.destroyed) return;
+    index = clamp(Math.round(index), 0, this.source.count - 1);
+    const cfg = this.motionConfig();
+    if (cfg.enabled === false) {
+      this.load(index, "requested").catch(() => {});
+      this.preloadNearby(index);
+      return;
+    }
+
+    const direction = Number(motion.direction) < 0 ? -1 : 1;
+    const velocity = Number(motion.velocity) || 0;
+    const tier = this.motionTier(velocity);
+    const projectedIndex = clamp(
+      Math.round(Number.isFinite(motion.projectedIndex) ? motion.projectedIndex : index),
+      0,
+      this.source.count - 1
+    );
+    const keep = new Set([index, projectedIndex]);
+
+    // Exact current visual always wins. The projected destination is next.
+    this.load(index, "requested").catch(() => {});
+
+    if (tier > 0 && projectedIndex !== index) {
+      const anchors = tier >= 2 ? 3 : 2;
+      for (let n = 1; n <= anchors; n++) {
+        const anchor = clamp(
+          Math.round(index + ((projectedIndex - index) * n) / anchors),
+          0,
+          this.source.count - 1
+        );
+        keep.add(anchor);
+        if (!this.cache.has(anchor)) this.load(anchor, "predictive").catch(() => {});
+      }
+
+      // Keep one sparse safety frame near the predicted landing warm. Critical
+      // indexes are already evenly distributed through the sequence.
+      const safety = this.criticalIndexes()
+        .sort((a, b) => Math.abs(a - projectedIndex) - Math.abs(b - projectedIndex))[0];
+      if (Number.isInteger(safety)) {
+        keep.add(safety);
+        if (!this.cache.has(safety)) this.load(safety, "predictive").catch(() => {});
+      }
+    }
+
+    if (tier >= 2) this.pruneMotionQueue(index, projectedIndex, direction, keep);
+    if (tier >= 3) this.preemptStaleActive(index, direction, velocity, keep);
+
+    if (tier === 0) this.preloadNearby(index);
+    else {
+      // A small directional halo improves continuity without refilling the queue
+      // with every skipped intermediate frame.
+      const halo = tier === 1 ? 3 : 2;
+      for (let n = 1; n <= halo; n++) {
+        const i = clamp(index + direction * n, 0, this.source.count - 1);
+        keep.add(i);
+        if (!this.cache.has(i)) this.load(i, "nearby").catch(() => {});
+      }
+    }
   }
 
   pump() {
@@ -1517,6 +1787,7 @@ class AssetManager {
 
     while (this.activeCount < maxConcurrent && this.queue.length) {
       const job = this.queue.shift();
+      this.queuedJobs.delete(job.index);
       this.execute(job);
     }
   }
@@ -1532,6 +1803,7 @@ class AssetManager {
     const url = this.frameUrl(job.index);
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     this.controllers.set(job.index, controller);
+    this.activeJobs.set(job.index, { job, controller });
     let timedOut = false;
     const requestTimer = controller
       ? setTimeout(() => {
@@ -1569,6 +1841,7 @@ class AssetManager {
     } finally {
       if (requestTimer) clearTimeout(requestTimer);
       this.controllers.delete(job.index);
+      this.activeJobs.delete(job.index);
       this.inflight.delete(job.index);
       this.activeCount = Math.max(0, this.activeCount - 1);
       this.pump();
@@ -1684,6 +1957,27 @@ class AssetManager {
     return null;
   }
 
+  bestCached(index, options = {}) {
+    const nearest = this.nearestCached(index);
+    if (!nearest || !options.preferMovement || !options.direction) return nearest;
+
+    const direction = options.direction < 0 ? -1 : 1;
+    const paintedIndex = Number.isInteger(options.paintedIndex) ? options.paintedIndex : null;
+    const maxLead = Math.max(2, Number(options.maxLead) || 8);
+
+    // When the nearest frame is simply the one already on screen, a fast fling
+    // looks frozen. If a directionally-correct predictive frame is available
+    // within a modest lead window, advance to it instead of holding stale pixels.
+    if (paintedIndex == null || nearest.index !== paintedIndex) return nearest;
+    for (let distance = 1; distance <= maxLead; distance++) {
+      const candidateIndex = index + direction * distance;
+      if (candidateIndex < 0 || candidateIndex >= this.source.count) break;
+      const frame = this.cache.get(candidateIndex);
+      if (frame) return { index: candidateIndex, frame };
+    }
+    return nearest;
+  }
+
   readiness() {
     const critical = this.criticalIndexes();
     const loaded = critical.filter((i) => this.loadedEver.has(i)).length;
@@ -1694,7 +1988,8 @@ class AssetManager {
       cacheSize: this.cache.size,
       failed: this.failed.size,
       queued: this.queue.length,
-      active: this.activeCount
+      active: this.activeCount,
+      queuedIndexes: this.queue.slice(0, 12).map((job) => job.index)
     };
   }
 
@@ -1709,12 +2004,15 @@ class AssetManager {
       try { controller?.abort?.(); } catch (_) {}
     }
     this.controllers.clear();
+    this.activeJobs.clear();
 
     const error = abortError("AssetManager destroyed");
     for (const job of this.queue.splice(0)) {
+      this.queuedJobs.delete(job.index);
       this.inflight.delete(job.index);
       job.reject(error);
     }
+    this.queuedJobs.clear();
 
     this.cache.clear();
     this.failed.clear();
@@ -1758,6 +2056,14 @@ class SequenceRenderer {
     this.lastDraw = 0;
     this.preloadPromise = null;
     this.throttleTimer = 0;
+    this.motion = {
+      direction: 1,
+      velocity: 0,
+      projectedProgress: 0,
+      tier: 0,
+      step: 1
+    };
+    this.lastPrimeSignature = "";
   }
 
   async prepare(options = {}) {
@@ -1816,16 +2122,71 @@ class SequenceRenderer {
     return Math.round(mediaProgress * (this.source.count - 1));
   }
 
+  motionConfig() {
+    return this.config.preload?.motion || {};
+  }
+
+  motionTier(velocity = this.motion.velocity) {
+    return this.assetManager.motionTier(velocity);
+  }
+
+  adaptiveStep(velocity = this.motion.velocity) {
+    const cfg = this.motionConfig();
+    if (cfg.enabled === false || cfg.adaptiveFrames === false) return 1;
+    const tier = this.motionTier(velocity);
+    const maxStep = Math.max(1, Math.round(Number(cfg.maxStep) || 4));
+    if (tier <= 0) return 1;
+    if (tier === 1) return Math.min(maxStep, 2);
+    if (tier === 2) return Math.min(maxStep, 3);
+    return maxStep;
+  }
+
+  displayIndex(progress) {
+    const exact = this.frameIndex(progress);
+    const range = this.config.playback?.range || { start: 0, end: 1 };
+    const first = Math.round(clamp(range.start) * (this.source.count - 1));
+    const last = Math.round(clamp(range.end) * (this.source.count - 1));
+    if (exact <= first || exact >= last) return exact; // endpoints are always exact
+
+    const step = this.adaptiveStep();
+    if (step <= 1) return exact;
+    const quantized = first + Math.round((exact - first) / step) * step;
+    return clamp(quantized, first, last);
+  }
+
+  updateMotion(motion = {}) {
+    const direction = Number(motion.direction) < 0 ? -1 : 1;
+    const velocity = Number(motion.velocity) || 0;
+    const projectedProgress = clamp(
+      Number.isFinite(motion.projectedProgress) ? motion.projectedProgress : this.runtime.progress
+    );
+    this.motion = {
+      direction,
+      velocity,
+      projectedProgress,
+      tier: this.motionTier(velocity),
+      step: this.adaptiveStep(velocity)
+    };
+  }
+
   /**
    * Cheap scrub arming: request only the exact frame needed at the current
    * boundary/progress. AssetManager deduplicates concurrent requests. Full
    * nearby/critical preloading remains governed by the existing preload policy.
    */
-  prime(progress) {
+  prime(progress, motion = {}) {
     if (this.runtime.destroyed) return;
-    const index = this.frameIndex(progress);
-    if (this.assetManager.cache.has(index) || this.assetManager.inflight.has(index)) return;
-    this.assetManager.load(index, "requested").catch(() => {});
+    this.updateMotion({ ...motion, projectedProgress: motion.projectedProgress ?? progress });
+    const index = this.displayIndex(progress);
+    const projectedIndex = this.displayIndex(this.motion.projectedProgress);
+    const signature = `${index}:${projectedIndex}:${this.motion.direction}:${this.motion.tier}`;
+    if (signature === this.lastPrimeSignature && this.assetManager.inflight.has(index)) return;
+    this.lastPrimeSignature = signature;
+    this.assetManager.scheduleMotion(index, {
+      direction: this.motion.direction,
+      velocity: this.motion.velocity,
+      projectedIndex
+    });
   }
 
   /**
@@ -1835,7 +2196,7 @@ class SequenceRenderer {
   hasDrawableFrame(progress = this.runtime.progress, { exact = false } = {}) {
     if (!this.hasPaintedFrame || !this.canvas || !this.ctx) return false;
     if (!exact) return true;
-    return this.paintedIndex === this.frameIndex(progress);
+    return this.paintedIndex === this.displayIndex(progress);
   }
 
   resize() {
@@ -1984,8 +2345,13 @@ class SequenceRenderer {
       return;
     }
 
-    const index = this.frameIndex(progress);
-    this.assetManager.preloadNearby(index);
+    const index = this.displayIndex(progress);
+    const projectedIndex = this.displayIndex(this.motion.projectedProgress);
+    this.assetManager.scheduleMotion(index, {
+      direction: this.motion.direction,
+      velocity: this.motion.velocity,
+      projectedIndex
+    });
 
     if (index === this.lastIndex && this.hasPaintedFrame && this.paintedIndex === index) return;
 
@@ -2001,7 +2367,12 @@ class SequenceRenderer {
     // Never blank an already-visible transition while waiting. Draw the nearest
     // available frame, then request the exact frame asynchronously. During first
     // scrub activation ScrubDriver still requires an exact painted frame.
-    const nearest = this.assetManager.nearestCached(index);
+    const nearest = this.assetManager.bestCached(index, {
+      direction: this.motion.direction,
+      preferMovement: this.motion.tier >= 2,
+      paintedIndex: this.paintedIndex,
+      maxLead: Math.max(4, this.motion.step * 3)
+    });
     if (nearest && nearest.index !== this.lastIndex) {
       if (this.draw(nearest.frame, nearest.index)) {
         this.lastIndex = nearest.index;
@@ -2069,6 +2440,7 @@ class SequenceRenderer {
     this.ctx = null;
     this.hasPaintedFrame = false;
     this.paintedIndex = -1;
+    this.motion = { direction: 1, velocity: 0, projectedProgress: 0, tier: 0, step: 1 };
   }
 }
 
@@ -3326,6 +3698,13 @@ class ScrollTriggerDriver {
     this.geometry = null;
     this.installed = false;
     this.lastPrime = null;
+    this.motion = {
+      direction: 1,
+      velocity: 0,
+      rawProgress: 0,
+      projectedProgress: 0
+    };
+    this.motionSettleTimer = 0;
   }
 
   mode() {
@@ -3394,6 +3773,9 @@ class ScrollTriggerDriver {
   }
 
   scrubValue() {
+    // Glide snap owns smoothing through the single document-scroll tween, so
+    // media must follow that real scroll position exactly with no second catch-up.
+    if (this.mode() === "snap" && this.runtime.config.scroll.snapStrategy !== "settle") return true;
     const configured = this.runtime.config.scroll.scrub;
     // Primary ScrollTrigger modes are always progress-linked. `false` would
     // turn the attached GSAP timeline into an ordinary toggle animation, which
@@ -3412,6 +3794,9 @@ class ScrollTriggerDriver {
 
   snapValue() {
     if (this.mode() !== "snap") return false;
+    // v0.6.3 default: snapping is a one-phase Observer-driven document glide.
+    // Keep ScrollTrigger snap only as an explicit compatibility strategy.
+    if (this.runtime.config.scroll.snapStrategy !== "settle") return false;
     const configured = this.runtime.config.scroll.snap;
     if (configured === false) return false;
     if (configured === "auto" && this.runtime.manager.documentSnapEnabled?.()) {
@@ -3477,6 +3862,7 @@ class ScrollTriggerDriver {
       fastScrollEnd: this.runtime.config.scroll.fastScrollEnd ?? false,
       preventOverlaps: this.runtime.config.scroll.preventOverlaps || false,
       onUpdate: (self) => this.onScrollTriggerUpdate(self),
+      onScrubComplete: (self) => this.onScrubComplete(self),
       onRefresh: (self) => this.onRefresh(self),
       onEnter: (self) => this.onBoundary("enter", self),
       onEnterBack: (self) => this.onBoundary("enterBack", self),
@@ -3494,7 +3880,7 @@ class ScrollTriggerDriver {
     this.trigger = this.ScrollTrigger.create(vars);
     this.installed = true;
     this.measure();
-    this.prime(0);
+    this.prime(0, this.motion, true);
     return true;
   }
 
@@ -3515,14 +3901,46 @@ class ScrollTriggerDriver {
     }
   }
 
+  scheduleMotionSettle(rawProgress, direction) {
+    if (this.motionSettleTimer) clearTimeout(this.motionSettleTimer);
+    const delay = Math.max(0, Number(this.runtime.config.preload?.motion?.settleMs) || 120);
+    this.motionSettleTimer = setTimeout(() => {
+      this.motionSettleTimer = 0;
+      if (this.runtime.destroyed) return;
+      const progress = clamp(Number(rawProgress) || 0);
+      this.motion = { direction, velocity: 0, rawProgress: progress, projectedProgress: progress };
+      this.prime(progress, this.motion, true);
+      this.runtime.requestRender?.();
+    }, delay);
+  }
+
   onScrollTriggerUpdate(self) {
     const direction = self?.direction < 0 ? -1 : 1;
     if (direction !== this.lastDirection) {
       this.lastDirection = direction;
       try { this.runtime.renderer?.prepareForDirection?.(direction); } catch (_) {}
     }
-    this.runtime.targetProgress = clamp(Number(self?.progress) || 0);
-    this.prime(this.runtime.targetProgress);
+
+    const rawProgress = clamp(Number(self?.progress) || 0);
+    const velocity = Number(self?.getVelocity?.()) || 0;
+    const span = Math.max(1, Math.abs(Number(self?.end) - Number(self?.start)) ||
+      Math.abs((this.geometry?.endY || 1) - (this.geometry?.startY || 0)) || 1);
+    const predictionMs = Math.max(0, Number(this.runtime.config.preload?.motion?.predictionMs) || 120);
+    const projectedProgress = clamp(rawProgress + (velocity / span) * (predictionMs / 1000));
+
+    this.motion = { direction, velocity, rawProgress, projectedProgress };
+    this.runtime.targetProgress = rawProgress;
+    this.prime(rawProgress, this.motion);
+    this.scheduleMotionSettle(rawProgress, direction);
+  }
+
+  onScrubComplete(self) {
+    if (this.motionSettleTimer) clearTimeout(this.motionSettleTimer);
+    this.motionSettleTimer = 0;
+    const rawProgress = clamp(Number(self?.progress ?? this.runtime.targetProgress) || 0);
+    const direction = self?.direction < 0 ? -1 : this.lastDirection;
+    this.motion = { direction, velocity: 0, rawProgress, projectedProgress: rawProgress };
+    this.prime(rawProgress, this.motion, true);
   }
 
   applyTimelineProgress() {
@@ -3542,11 +3960,13 @@ class ScrollTriggerDriver {
     catch (_) { return false; }
   }
 
-  prime(progress) {
+  prime(progress, motion = this.motion, force = false) {
     const normalized = clamp(progress);
-    if (this.lastPrime != null && Math.abs(this.lastPrime - normalized) < 0.0001) return;
-    this.lastPrime = normalized;
-    try { this.runtime.renderer?.prime?.(normalized); } catch (_) {}
+    const tier = this.runtime.renderer?.assetManager?.motionTier?.(motion?.velocity) ?? 0;
+    const signature = `${normalized.toFixed(4)}:${motion?.direction || 1}:${tier}:${Number(motion?.projectedProgress || 0).toFixed(3)}`;
+    if (!force && this.lastPrime === signature) return;
+    this.lastPrime = signature;
+    try { this.runtime.renderer?.prime?.(normalized, motion); } catch (_) {}
   }
 
   activateOverlay() {
@@ -3631,6 +4051,7 @@ class ScrollTriggerDriver {
       endY: Number.isFinite(end) ? end : this.endValue(),
       scrub: this.scrubValue(),
       snap: !!this.snapValue(),
+      snapStrategy: this.mode() === "snap" ? (this.runtime.config.scroll.snapStrategy || "glide") : null,
       pin: !!this.pinValue()
     };
     return this.geometry;
@@ -3649,6 +4070,9 @@ class ScrollTriggerDriver {
       progress: Number(this.runtime.progress.toFixed(3)),
       rawProgress: Number((this.trigger?.progress || 0).toFixed?.(3) || 0),
       direction: this.lastDirection,
+      velocity: Math.round(this.motion.velocity || 0),
+      projectedProgress: Number((this.motion.projectedProgress || 0).toFixed(3)),
+      adaptiveStep: this.runtime.renderer?.motion?.step || 1,
       overlayWanted: this.overlayWanted,
       overlayActive: this.overlayActive,
       visualReady: this.rendererHasDrawable({ exact: false }),
@@ -3661,6 +4085,8 @@ class ScrollTriggerDriver {
   }
 
   destroy() {
+    if (this.motionSettleTimer) clearTimeout(this.motionSettleTimer);
+    this.motionSettleTimer = 0;
     this.overlayWanted = false;
     this.deactivateOverlay();
     try { this.trigger?.kill?.(true); } catch (_) {}
@@ -3670,6 +4096,317 @@ class ScrollTriggerDriver {
     this.trigger = null;
     this.timeline = null;
     this.installed = false;
+  }
+}
+
+
+
+/* ===== src/drivers/SnapGlideController.js ===== */
+
+/**
+ * One-phase section navigation for scroll.mode="snap".
+ *
+ * ScrollTrigger continues to own progress/media mapping. Observer only claims a
+ * wheel/touch gesture when the viewport is already at an eligible transition
+ * boundary, then one GSAP tween moves the real document scroll position from
+ * that boundary to the adjacent one. This avoids native/CSS momentum settling
+ * followed by a second ScrollTrigger snap animation.
+ */
+class SnapGlideController {
+  constructor(manager, adapter) {
+    this.manager = manager;
+    this.gsap = adapter?.gsap || null;
+    this.ScrollTrigger = adapter?.ScrollTrigger || null;
+    this.observer = null;
+    this.tween = null;
+    this.animating = false;
+    this.gestureActive = false;
+    this.inputStopped = true;
+    this.destroyed = false;
+    this.cssSnapshot = null;
+
+    this.onChangeY = this.onChangeY.bind(this);
+    this.onStop = this.onStop.bind(this);
+    this.onKeyDown = this.onKeyDown.bind(this);
+  }
+
+  runtimes() {
+    return this.manager.runtimes.filter((runtime) =>
+      !runtime.destroyed &&
+      runtime.usesScrollTrigger?.() &&
+      runtime.normalizedScrollMode?.() === "snap" &&
+      runtime.config.scroll?.snap !== false &&
+      runtime.config.scroll?.snapStrategy !== "settle"
+    );
+  }
+
+  options(runtime = null) {
+    return runtime?.config?.scroll?.snapGlide || this.manager.options.scroll?.snapGlide || {};
+  }
+
+  install() {
+    if (this.destroyed || this.observer || !this.runtimes().length) return false;
+    if (!this.gsap || typeof this.ScrollTrigger?.observe !== "function") {
+      throw new Error("[SectionTransition] GSAP ScrollTrigger.observe() is required for snap glide mode");
+    }
+
+    const options = this.options();
+    if (options.disableCssSnap !== false) this.disableCssSnap();
+
+    // passive:false + debounce:false lets us conditionally prevent the current
+    // event synchronously only when a transition boundary actually claims it.
+    // Native scrolling remains untouched everywhere else (including tall scenes).
+    this.observer = this.ScrollTrigger.observe({
+      target: window,
+      type: options.type || "wheel,touch",
+      passive: false,
+      preventDefault: false,
+      debounce: false,
+      lockAxis: true,
+      tolerance: Math.max(1, Number(options.inputTolerance) || 8),
+      dragMinimum: Math.max(0, Number(options.dragMinimum) || 6),
+      ignore: options.ignore || "input,textarea,select,button,[contenteditable='true'],[data-st-native-scroll]",
+      onChangeY: this.onChangeY,
+      onStop: this.onStop,
+      onStopDelay: Math.max(0.05, Number(options.onStopDelay) || 0.18)
+    });
+
+    if (options.keyboard !== false) {
+      document.addEventListener("keydown", this.onKeyDown, { capture: true });
+    }
+    return true;
+  }
+
+  snapshotStyle(element, property) {
+    return {
+      value: element?.style?.getPropertyValue?.(property) || "",
+      priority: element?.style?.getPropertyPriority?.(property) || ""
+    };
+  }
+
+  restoreStyle(element, property, snapshot) {
+    if (!element?.style || !snapshot) return;
+    if (snapshot.value) element.style.setProperty(property, snapshot.value, snapshot.priority || "");
+    else element.style.removeProperty(property);
+  }
+
+  disableCssSnap() {
+    const root = document.documentElement;
+    const body = document.body;
+    this.cssSnapshot = {
+      rootSnap: this.snapshotStyle(root, "scroll-snap-type"),
+      bodySnap: this.snapshotStyle(body, "scroll-snap-type"),
+      rootBehavior: this.snapshotStyle(root, "scroll-behavior"),
+      bodyBehavior: this.snapshotStyle(body, "scroll-behavior")
+    };
+    root?.style?.setProperty?.("scroll-snap-type", "none", "important");
+    body?.style?.setProperty?.("scroll-snap-type", "none", "important");
+    root?.style?.setProperty?.("scroll-behavior", "auto", "important");
+    body?.style?.setProperty?.("scroll-behavior", "auto", "important");
+  }
+
+  restoreCssSnap() {
+    if (!this.cssSnapshot) return;
+    const root = document.documentElement;
+    const body = document.body;
+    this.restoreStyle(root, "scroll-snap-type", this.cssSnapshot.rootSnap);
+    this.restoreStyle(body, "scroll-snap-type", this.cssSnapshot.bodySnap);
+    this.restoreStyle(root, "scroll-behavior", this.cssSnapshot.rootBehavior);
+    this.restoreStyle(body, "scroll-behavior", this.cssSnapshot.bodyBehavior);
+    this.cssSnapshot = null;
+  }
+
+  eventDirection(observer) {
+    const delta = Number(observer?.deltaY) || 0;
+    if (!delta) return 0;
+    const type = String(observer?.event?.type || "").toLowerCase();
+    // Wheel deltaY > 0 means scroll forward/down. A touch/pointer finger moving
+    // upward has negative deltaY but produces the same forward page intent.
+    const touchLike = type.includes("touch") || type.includes("pointer");
+    return touchLike ? (delta < 0 ? 1 : -1) : (delta > 0 ? 1 : -1);
+  }
+
+  preventEvent(observer) {
+    const event = observer?.event;
+    if (event?.cancelable !== false && typeof event?.preventDefault === "function") {
+      try { event.preventDefault(); } catch (_) {}
+    }
+  }
+
+  canNestedScroll(target, direction) {
+    let node = target?.nodeType === 1 ? target : target?.parentElement;
+    const body = document.body;
+    const root = document.documentElement;
+    while (node && node !== body && node !== root) {
+      try {
+        const style = getComputedStyle(node);
+        const overflow = `${style.overflowY || ""} ${style.overflow || ""}`;
+        if (/(auto|scroll|overlay)/.test(overflow) && node.scrollHeight > node.clientHeight + 1) {
+          const max = node.scrollHeight - node.clientHeight;
+          if (direction > 0 && node.scrollTop < max - 1) return true;
+          if (direction < 0 && node.scrollTop > 1) return true;
+        }
+      } catch (_) {}
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  boundaryFor(runtime, direction) {
+    const driver = runtime?.driver;
+    if (!driver) return null;
+    const value = direction > 0 ? driver.startValue?.() : driver.endValue?.();
+    return Number.isFinite(Number(value)) ? Number(value) : null;
+  }
+
+  destinationFor(runtime, direction) {
+    const driver = runtime?.driver;
+    if (!driver) return null;
+    const value = direction > 0 ? driver.endValue?.() : driver.startValue?.();
+    return Number.isFinite(Number(value)) ? Number(value) : null;
+  }
+
+  findRuntime(direction, y = Number(window.scrollY) || 0) {
+    let best = null;
+    let bestDistance = Infinity;
+    for (const runtime of this.runtimes()) {
+      const boundary = this.boundaryFor(runtime, direction);
+      if (!Number.isFinite(boundary)) continue;
+      const tolerance = Math.max(1, Number(this.options(runtime).boundaryTolerance) || 18);
+      const distance = Math.abs(y - boundary);
+      if (distance <= tolerance && distance < bestDistance) {
+        best = runtime;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  durationFor(runtime, distance) {
+    const configured = this.options(runtime).duration;
+    if (Number.isFinite(configured)) return Math.max(0.05, Number(configured));
+    const min = Math.max(0.05, Number(configured?.min) || 0.42);
+    const max = Math.max(min, Number(configured?.max) || 0.72);
+    const viewport = Math.max(1, Number(window.visualViewport?.height) || Number(window.innerHeight) || 1);
+    const ratio = clamp(Math.abs(distance) / viewport, 0, 1.5) / 1.5;
+    return min + (max - min) * ratio;
+  }
+
+  onChangeY(observer) {
+    if (this.destroyed) return;
+    const direction = this.eventDirection(observer);
+    if (!direction) return;
+
+    if (this.animating || this.gestureActive) {
+      this.preventEvent(observer);
+      return;
+    }
+
+    if (this.canNestedScroll(observer?.event?.target, direction)) return;
+    const runtime = this.findRuntime(direction);
+    if (!runtime) return; // native scrolling remains untouched away from boundaries
+
+    this.preventEvent(observer);
+    this.gestureActive = true;
+    this.inputStopped = false;
+    this.glide(runtime, direction);
+  }
+
+  onStop() {
+    this.inputStopped = true;
+    if (!this.animating) this.gestureActive = false;
+  }
+
+  glide(runtime, direction) {
+    if (this.destroyed || this.animating) return false;
+    const from = Number(window.scrollY) || 0;
+    const target = this.destinationFor(runtime, direction);
+    if (!Number.isFinite(target)) return false;
+
+    const distance = target - from;
+    if (Math.abs(distance) <= 0.5) {
+      window.scrollTo(0, target);
+      this.ScrollTrigger?.update?.();
+      this.gestureActive = false;
+      return true;
+    }
+
+    this.animating = true;
+    const state = { y: from };
+    const options = this.options(runtime);
+    const duration = this.durationFor(runtime, distance);
+    const ease = options.ease || "power2.inOut";
+
+    try { this.tween?.kill?.(); } catch (_) {}
+    this.tween = this.gsap.to(state, {
+      y: target,
+      duration,
+      ease,
+      overwrite: true,
+      onStart: () => {
+        try { runtime.renderer?.prepareForDirection?.(direction); } catch (_) {}
+      },
+      onUpdate: () => {
+        window.scrollTo(0, state.y);
+        try { this.ScrollTrigger?.update?.(); } catch (_) {}
+      },
+      onComplete: () => {
+        window.scrollTo(0, target);
+        try { this.ScrollTrigger?.update?.(); } catch (_) {}
+        this.tween = null;
+        this.animating = false;
+        if (this.inputStopped) this.gestureActive = false;
+      },
+      onInterrupt: () => {
+        this.tween = null;
+        this.animating = false;
+        if (this.inputStopped) this.gestureActive = false;
+      }
+    });
+    return true;
+  }
+
+  onKeyDown(event) {
+    if (this.destroyed || event.defaultPrevented) return;
+    const target = event.target;
+    const tag = String(target?.tagName || "").toLowerCase();
+    if (target?.isContentEditable || ["input", "textarea", "select", "button"].includes(tag)) return;
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+
+    let direction = 0;
+    if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) direction = 1;
+    if (["ArrowUp", "PageUp"].includes(event.key) || (event.key === " " && event.shiftKey)) direction = -1;
+    if (!direction || this.animating || this.gestureActive) return;
+
+    const runtime = this.findRuntime(direction);
+    if (!runtime) return;
+    event.preventDefault();
+    this.gestureActive = true;
+    this.inputStopped = true;
+    this.glide(runtime, direction);
+  }
+
+  diagnostic() {
+    return {
+      installed: !!this.observer,
+      animating: this.animating,
+      gestureActive: this.gestureActive,
+      cssSnapSuppressed: !!this.cssSnapshot,
+      strategy: "glide"
+    };
+  }
+
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    try { this.tween?.kill?.(); } catch (_) {}
+    try { this.observer?.kill?.(); } catch (_) {}
+    document.removeEventListener("keydown", this.onKeyDown, { capture: true });
+    this.restoreCssSnap();
+    this.tween = null;
+    this.observer = null;
+    this.animating = false;
+    this.gestureActive = false;
   }
 }
 
@@ -5229,6 +5966,7 @@ class TransitionRuntime {
 
 
 
+
 class Manager {
   constructor(options) {
     this.options = options;
@@ -5244,6 +5982,7 @@ class Manager {
     this.scrollAdapter = resolveGSAP(options);
     this.sceneEngine = new SceneBackgroundEngine(this, options.scene || {});
     this.autoOwner = null;
+    this.snapGlide = null;
     this.destroyed = false;
 
     this.onScroll = this.onScroll.bind(this);
@@ -5434,6 +6173,20 @@ class Manager {
     this.installLayoutObservers();
     this.installPreloadObserver();
     try { this.scrollAdapter?.ScrollTrigger?.refresh?.(); } catch (_) {}
+
+    const needsSnapGlide = this.runtimes.some((runtime) =>
+      runtime.usesScrollTrigger?.() &&
+      runtime.normalizedScrollMode?.() === "snap" &&
+      runtime.config.scroll?.snap !== false &&
+      runtime.config.scroll?.snapStrategy !== "settle"
+    );
+    if (needsSnapGlide) {
+      this.snapGlide = new SnapGlideController(this, this.scrollAdapter);
+      this.snapGlide.install();
+      // CSS scroll-snap may have been suppressed by the glide controller.
+      // Refresh once more so ScrollTrigger measurements reflect the final style.
+      try { this.scrollAdapter?.ScrollTrigger?.refresh?.(); } catch (_) {}
+    }
 
     if (this.options.layout.refreshOnFonts && document.fonts?.ready) {
       document.fonts.ready.then(() => this.refresh()).catch(() => {});
@@ -5629,6 +6382,10 @@ class Manager {
     return this.sceneEngine?.diagnostic?.() || null;
   }
 
+  snapDiagnostics() {
+    return this.snapGlide?.diagnostic?.() || null;
+  }
+
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -5640,6 +6397,8 @@ class Manager {
     window.visualViewport?.removeEventListener?.("resize", this.onResize);
     document.removeEventListener("visibilitychange", this.onVisibility);
     this.input?.detach?.();
+    this.snapGlide?.destroy?.();
+    this.snapGlide = null;
     this.resizeObserver?.disconnect();
     this.intersectionObservers.forEach((observer) => observer.disconnect());
     this.intersectionObservers = [];
@@ -5648,6 +6407,7 @@ class Manager {
     this.runtimes.forEach((runtime) => runtime.destroy());
     this.runtimes = [];
     this.autoOwner = null;
+    this.snapGlide = null;
     this.sceneEngine.destroy();
 
     // Last-resort unlock in case third-party code interrupted runtime cleanup.
@@ -5662,7 +6422,7 @@ class Manager {
 
 
 const SectionTransition = {
-  version: "0.6.0",
+  version: "0.6.3",
 
   useGSAP(gsap, ScrollTrigger) {
     registerGSAP(gsap, ScrollTrigger);

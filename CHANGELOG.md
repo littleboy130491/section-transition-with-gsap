@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.6.3
+
+One-phase snap glide.
+
+- Replaced the default ScrollTrigger settle-after-scroll snap with `SnapGlideController`.
+- `mode:"snap"` now uses `ScrollTrigger.observe()` to claim wheel/touch intent only at valid transition boundaries.
+- One GSAP tween moves the real document scroll position from source boundary to target boundary; ScrollTrigger media/content progress follows that same tween.
+- Glide mode suppresses root/body CSS scroll-snap and smooth-scroll styles while active and restores their exact prior inline values/priorities on destroy, eliminating dual snap authorities.
+- `scrub` is forced to direct (`true`) for glide snap so media has no independent catch-up phase.
+- Momentum events from the same gesture are absorbed until input stops, preventing trackpad/touch momentum from accidentally advancing multiple sections.
+- Tall sections retain native scrolling; forward glide is claimed only at the source's final viewport, while reverse glide is claimed at the target boundary.
+- Nested scrollable descendants remain native when they can still scroll in the requested direction.
+- Added keyboard boundary navigation for Arrow/Page/Space keys while preserving editable controls.
+- Added `scroll.snapStrategy: "glide" | "settle"` and `scroll.snapGlide.*` tuning.
+- Legacy ScrollTrigger snap remains available through `snapStrategy:"settle"`.
+- Added `manager.snapDiagnostics()` and glide regression coverage.
+
+## 0.6.2
+
+Fast-swipe sequence scheduler.
+
+- Sequence scheduling now consumes `ScrollTrigger.getVelocity()` and projects a short distance ahead of the raw scroll position.
+- Added adaptive frame stepping under velocity pressure (1/2/3/4 by default); slow scrolling and both endpoints remain exact.
+- Added in-place priority promotion when a previously queued nearby frame becomes the exact requested frame.
+- Fast flings prune stale queued predictive/nearby/progressive requests so old work cannot monopolize future decode slots.
+- Extreme flings may preempt at most one stale low-priority active request when every concurrency slot is occupied and the exact frame is queued.
+- Added directionally-aware cached-frame fallback so a predictive frame can advance the visual instead of holding the same stale frame during a fling.
+- Added motion settling: after scroll activity stops, sequence rendering returns to exact frame selection even with direct `scrub:true`.
+- Added diagnostics for velocity, projected progress, adaptive step, and queued frame indexes.
+- Added validation and documentation for `preload.motion.*`.
+- Added regressions for stale-queue pruning, adaptive stepping, directional fallback, velocity projection, and post-fling exact settling.
+
+## 0.6.1
+
+- Fixed persistent-scene ownership during cold/partial background loading: once the first drawable scene visual is on the shared canvas, all scenes with `data-st-background` become transparent surfaces together, preventing an incoming section background color/image from covering the canvas while its own endpoint image is still warming.
+- Scene loading now gives `high` fetch priority to the current and immediately-next scene background; farther/behind preloads remain normal priority.
+- If a scene background ultimately fails, only that scene drops persistent-surface ownership so authored CSS can fail open.
+- Added regression coverage for shared surface ownership and scene preload priority.
+
 ## 0.6.0
 
 GSAP ScrollTrigger engine refactor.

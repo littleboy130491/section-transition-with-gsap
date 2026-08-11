@@ -1,5 +1,16 @@
 # SectionTransition v0.6 Architecture
 
+## v0.6.3 snap glide
+
+`ScrollTriggerDriver` still maps actual document scroll to normalized media/content progress, but it no longer asks ScrollTrigger to perform endpoint snapping in the default snap strategy.
+
+`SnapGlideController` uses `ScrollTrigger.observe()` as the input-intent layer. It conditionally prevents wheel/touch input only when the document is already at an eligible section boundary, then creates one GSAP tween of the real document scroll position. This makes scroll position, transition progress, scene background, and content timeline one continuous motion.
+
+CSS scroll snap is suppressed during glide ownership so there is never a second landing authority. The old ScrollTrigger snap implementation is retained as `snapStrategy:"settle"`.
+
+Tall authored sections are not captured until their outgoing final-viewport boundary; nested scrollable descendants also retain priority while they can still scroll.
+
+
 ## Design principle
 
 Do not reinvent generic scroll orchestration.
@@ -86,6 +97,28 @@ optional target content enter
 ```
 
 For numerical `scrub`, media is updated from the **GSAP animation playhead**, not raw `ScrollTrigger.progress`, so the renderer follows the smoothed playhead correctly.
+
+## Velocity-aware sequence scheduling
+
+ScrollTrigger remains the only scroll authority. v0.6.2 uses `ScrollTrigger.getVelocity()` purely as a media-loading hint:
+
+```text
+ScrollTrigger raw progress + velocity
+              │
+              ├─> short projected progress
+              │
+              ▼
+SequenceRenderer adaptive display index
+              │
+              ▼
+AssetManager motion scheduler
+  exact requested > predictive > nearby > progressive
+              │
+              ├─ prunes stale queued work on fast flings
+              └─ may preempt one stale low-priority active request at extreme velocity
+```
+
+This layer never calls `preventDefault()`, changes scroll position, or changes ScrollTrigger progress. Its only job is to spend bounded download/decode concurrency on useful future frames. After a short quiet period, velocity is reset to zero and exact frame selection resumes. Endpoints are never quantized.
 
 ## Geometry
 

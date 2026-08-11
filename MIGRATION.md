@@ -1,3 +1,33 @@
+# Migrating to v0.6.3
+
+## v0.6.2 → v0.6.3 snap behavior
+
+The default `snap` strategy changed because ScrollTrigger/native snapping is inherently a settle-after-scroll interaction and can feel like `scroll → stop → continue`.
+
+Old default behavior can be retained explicitly:
+
+```js
+scroll: {
+  mode: "snap",
+  snapStrategy: "settle"
+}
+```
+
+The new default is:
+
+```js
+scroll: {
+  mode: "snap",
+  snapStrategy: "glide"
+}
+```
+
+Glide mode temporarily disables root/body CSS scroll snap while the manager exists. Remove any JavaScript that manually toggles CSS snap for the same scene chain. CSS values are restored on `manager.destroy()`.
+
+`mode:"auto"` remains an alias for `snap`, so it now uses glide too. Use `mode:"takeover"` only when you specifically need the old media-takeover engine.
+
+---
+
 # Migration: v0.5.x → v0.6.0
 
 ## 1. Load GSAP + ScrollTrigger

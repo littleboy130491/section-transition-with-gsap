@@ -5,11 +5,12 @@ const bundle = fs.readFileSync(new URL("../dist/section-transition.js", import.m
 const esm = fs.readFileSync(new URL("../dist/section-transition.mjs", import.meta.url), "utf8");
 const css = fs.readFileSync(new URL("../dist/section-transition.css", import.meta.url), "utf8");
 
-assert.match(bundle, /version:\s*"0\.6\.0"/);
+assert.match(bundle, /version:\s*"0\.6\.3"/);
 assert.match(bundle, /class FrameCache/);
 assert.match(bundle, /class AssetManager/);
 assert.match(bundle, /class ScrubDriver/);
 assert.match(bundle, /class ScrollTriggerDriver/);
+assert.match(bundle, /class SnapGlideController/);
 assert.match(bundle, /class GSAPContentTimeline/);
 assert.match(bundle, /registerGSAP/);
 assert.match(bundle, /GSAP \+ ScrollTrigger are required/);
@@ -59,7 +60,7 @@ assert.match(css, /\.st-stage--scrub-sticky[\s\S]*?position:\s*sticky/);
 assert.doesNotMatch(css, /st-stage--scrub-playing/);
 
 const moduleEntry = await import("../dist/section-transition.mjs");
-assert.equal(moduleEntry.SectionTransition.version, "0.6.0");
+assert.equal(moduleEntry.SectionTransition.version, "0.6.3");
 assert.equal(typeof moduleEntry.SectionTransition.useGSAP, "function");
 
 console.log("Smoke assertions passed.");

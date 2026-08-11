@@ -35,7 +35,20 @@ export const DEFAULTS = {
     scrubRange: "sections",  // "sections" | "distance"
     scrubEngine: "scene",     // legacy compatibility: "auto"|"scene"|"sticky"|"legacy"
     reversible: true,
-    snap: "auto",             // snap mode: true|false|"auto"|ScrollTrigger snap object
+    snap: "auto",             // snap mode enabled unless false; "auto" is kept for compatibility
+    snapStrategy: "glide",     // "glide" (Observer + one GSAP scroll tween) | "settle" (legacy ScrollTrigger snap)
+    snapGlide: {
+      type: "wheel,touch",
+      inputTolerance: 8,
+      dragMinimum: 6,
+      boundaryTolerance: 18,
+      duration: { min: 0.42, max: 0.72 },
+      ease: "power2.inOut",
+      onStopDelay: 0.18,
+      disableCssSnap: true,
+      keyboard: true,
+      ignore: "input,textarea,select,button,[contenteditable='true'],[data-st-native-scroll]"
+    },
     pin: false,               // optional ScrollTrigger pin target/boolean
     pinSpacing: true,
     pinReparent: false,
@@ -137,7 +150,24 @@ export const DEFAULTS = {
     intersectionMargin: "150% 0px",
     deferUntilNear: true,
     readyFrames: 8,
-    maxConcurrent: 4
+    maxConcurrent: 4,
+
+    // Sequence-only fast-scroll scheduler. Scroll itself stays native; these
+    // options only decide which decoded frames get scarce network/decode slots.
+    motion: {
+      enabled: true,
+      predictionMs: 120,
+      settleMs: 120,
+      mediumVelocity: 900,
+      fastVelocity: 1800,
+      extremeVelocity: 2800,
+      adaptiveFrames: true,
+      maxStep: 4,
+      pruneStale: true,
+      preemptStale: true,
+      keepRadius: 12,
+      preemptDistance: 16
+    }
   },
 
   cache: {
@@ -282,12 +312,47 @@ export function validateTransitionConfig(name, cfg) {
     problems.push("preload.maxConcurrent must be >= 1");
   }
 
+  const motion = cfg?.preload?.motion || {};
+  if (!Number.isFinite(motion.predictionMs) || motion.predictionMs < 0 || motion.predictionMs > 1000) {
+    problems.push("preload.motion.predictionMs must be between 0 and 1000ms");
+  }
+  if (!Number.isFinite(motion.settleMs) || motion.settleMs < 0 || motion.settleMs > 1000) {
+    problems.push("preload.motion.settleMs must be between 0 and 1000ms");
+  }
+  for (const [key, min] of [["mediumVelocity", 1], ["fastVelocity", 1], ["extremeVelocity", 1]]) {
+    if (!Number.isFinite(motion[key]) || motion[key] < min) {
+      problems.push(`preload.motion.${key} must be >= ${min}`);
+    }
+  }
+  if (
+    Number.isFinite(motion.mediumVelocity) &&
+    Number.isFinite(motion.fastVelocity) &&
+    Number.isFinite(motion.extremeVelocity) &&
+    !(motion.mediumVelocity <= motion.fastVelocity && motion.fastVelocity <= motion.extremeVelocity)
+  ) {
+    problems.push("preload.motion velocity thresholds must be ordered medium <= fast <= extreme");
+  }
+  if (!Number.isInteger(motion.maxStep) || motion.maxStep < 1 || motion.maxStep > 12) {
+    problems.push("preload.motion.maxStep must be an integer between 1 and 12");
+  }
+  if (!Number.isFinite(motion.keepRadius) || motion.keepRadius < 1) {
+    problems.push("preload.motion.keepRadius must be >= 1");
+  }
+  if (!Number.isFinite(motion.preemptDistance) || motion.preemptDistance < 1) {
+    problems.push("preload.motion.preemptDistance must be >= 1");
+  }
+
   if (!Number.isFinite(cfg?.loading?.timeout) || cfg.loading.timeout < 1000) {
     problems.push("loading.timeout must be >= 1000ms");
   }
 
   if (!Number.isFinite(cfg?.scroll?.triggerThreshold) || cfg.scroll.triggerThreshold < 1) {
     problems.push("scroll.triggerThreshold must be >= 1");
+  }
+
+  const snapStrategy = cfg?.scroll?.snapStrategy;
+  if (!(snapStrategy === "glide" || snapStrategy === "settle")) {
+    problems.push('scroll.snapStrategy must be "glide" or "settle"');
   }
 
   const snap = cfg?.scroll?.snap;

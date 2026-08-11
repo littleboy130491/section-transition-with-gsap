@@ -1,5 +1,5 @@
 /**
- * SectionTransition v0.6.0
+ * SectionTransition v0.6.3
  * Structural CSS only. Visual design remains controlled by transition config.
  */
 
@@ -184,11 +184,14 @@
 }
 
 /*
- * Ownership is applied only after the scene engine has a drawable background
- * or committed transition endpoint. This preserves authored CSS as a fail-open
- * fallback while media is unavailable.
+ * Once the persistent scene surface has its first drawable visual, all scenes
+ * with managed static backgrounds become transparent together so an incoming
+ * section cannot cover the continuous canvas while its own endpoint warms.
+ * Individual failed scenes can drop this surface-ownership class to fail open
+ * to authored CSS.
  */
-.st-scene-owned {
+.st-scene-owned,
+.st-scene-surface-owned {
   background-image: none !important;
   background-color: transparent !important;
 }

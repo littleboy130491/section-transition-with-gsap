@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SectionTransition v0.6.0 — Snap Video</title>
+  <title>SectionTransition v0.6.3 — Snap Video</title>
   <link rel="stylesheet" href="../dist/section-transition.css">
 </head>
 <body style="margin:0">
@@ -29,7 +29,8 @@
               trim: { start: 0, end: 2.8 }
             },
             scroll: {
-              mode: "snap"
+              mode: "snap",
+              snapStrategy: "glide"
             },
             render: {
               zIndex: 900

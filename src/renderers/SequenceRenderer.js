@@ -32,6 +32,14 @@ export class SequenceRenderer {
     this.lastDraw = 0;
     this.preloadPromise = null;
     this.throttleTimer = 0;
+    this.motion = {
+      direction: 1,
+      velocity: 0,
+      projectedProgress: 0,
+      tier: 0,
+      step: 1
+    };
+    this.lastPrimeSignature = "";
   }
 
   async prepare(options = {}) {
@@ -90,16 +98,71 @@ export class SequenceRenderer {
     return Math.round(mediaProgress * (this.source.count - 1));
   }
 
+  motionConfig() {
+    return this.config.preload?.motion || {};
+  }
+
+  motionTier(velocity = this.motion.velocity) {
+    return this.assetManager.motionTier(velocity);
+  }
+
+  adaptiveStep(velocity = this.motion.velocity) {
+    const cfg = this.motionConfig();
+    if (cfg.enabled === false || cfg.adaptiveFrames === false) return 1;
+    const tier = this.motionTier(velocity);
+    const maxStep = Math.max(1, Math.round(Number(cfg.maxStep) || 4));
+    if (tier <= 0) return 1;
+    if (tier === 1) return Math.min(maxStep, 2);
+    if (tier === 2) return Math.min(maxStep, 3);
+    return maxStep;
+  }
+
+  displayIndex(progress) {
+    const exact = this.frameIndex(progress);
+    const range = this.config.playback?.range || { start: 0, end: 1 };
+    const first = Math.round(clamp(range.start) * (this.source.count - 1));
+    const last = Math.round(clamp(range.end) * (this.source.count - 1));
+    if (exact <= first || exact >= last) return exact; // endpoints are always exact
+
+    const step = this.adaptiveStep();
+    if (step <= 1) return exact;
+    const quantized = first + Math.round((exact - first) / step) * step;
+    return clamp(quantized, first, last);
+  }
+
+  updateMotion(motion = {}) {
+    const direction = Number(motion.direction) < 0 ? -1 : 1;
+    const velocity = Number(motion.velocity) || 0;
+    const projectedProgress = clamp(
+      Number.isFinite(motion.projectedProgress) ? motion.projectedProgress : this.runtime.progress
+    );
+    this.motion = {
+      direction,
+      velocity,
+      projectedProgress,
+      tier: this.motionTier(velocity),
+      step: this.adaptiveStep(velocity)
+    };
+  }
+
   /**
    * Cheap scrub arming: request only the exact frame needed at the current
    * boundary/progress. AssetManager deduplicates concurrent requests. Full
    * nearby/critical preloading remains governed by the existing preload policy.
    */
-  prime(progress) {
+  prime(progress, motion = {}) {
     if (this.runtime.destroyed) return;
-    const index = this.frameIndex(progress);
-    if (this.assetManager.cache.has(index) || this.assetManager.inflight.has(index)) return;
-    this.assetManager.load(index, "requested").catch(() => {});
+    this.updateMotion({ ...motion, projectedProgress: motion.projectedProgress ?? progress });
+    const index = this.displayIndex(progress);
+    const projectedIndex = this.displayIndex(this.motion.projectedProgress);
+    const signature = `${index}:${projectedIndex}:${this.motion.direction}:${this.motion.tier}`;
+    if (signature === this.lastPrimeSignature && this.assetManager.inflight.has(index)) return;
+    this.lastPrimeSignature = signature;
+    this.assetManager.scheduleMotion(index, {
+      direction: this.motion.direction,
+      velocity: this.motion.velocity,
+      projectedIndex
+    });
   }
 
   /**
@@ -109,7 +172,7 @@ export class SequenceRenderer {
   hasDrawableFrame(progress = this.runtime.progress, { exact = false } = {}) {
     if (!this.hasPaintedFrame || !this.canvas || !this.ctx) return false;
     if (!exact) return true;
-    return this.paintedIndex === this.frameIndex(progress);
+    return this.paintedIndex === this.displayIndex(progress);
   }
 
   resize() {
@@ -258,8 +321,13 @@ export class SequenceRenderer {
       return;
     }
 
-    const index = this.frameIndex(progress);
-    this.assetManager.preloadNearby(index);
+    const index = this.displayIndex(progress);
+    const projectedIndex = this.displayIndex(this.motion.projectedProgress);
+    this.assetManager.scheduleMotion(index, {
+      direction: this.motion.direction,
+      velocity: this.motion.velocity,
+      projectedIndex
+    });
 
     if (index === this.lastIndex && this.hasPaintedFrame && this.paintedIndex === index) return;
 
@@ -275,7 +343,12 @@ export class SequenceRenderer {
     // Never blank an already-visible transition while waiting. Draw the nearest
     // available frame, then request the exact frame asynchronously. During first
     // scrub activation ScrubDriver still requires an exact painted frame.
-    const nearest = this.assetManager.nearestCached(index);
+    const nearest = this.assetManager.bestCached(index, {
+      direction: this.motion.direction,
+      preferMovement: this.motion.tier >= 2,
+      paintedIndex: this.paintedIndex,
+      maxLead: Math.max(4, this.motion.step * 3)
+    });
     if (nearest && nearest.index !== this.lastIndex) {
       if (this.draw(nearest.frame, nearest.index)) {
         this.lastIndex = nearest.index;
@@ -343,5 +416,6 @@ export class SequenceRenderer {
     this.ctx = null;
     this.hasPaintedFrame = false;
     this.paintedIndex = -1;
+    this.motion = { direction: 1, velocity: 0, projectedProgress: 0, tier: 0, step: 1 };
   }
 }

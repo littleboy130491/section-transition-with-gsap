@@ -1,5 +1,14 @@
 # AI Agent Guide — SectionTransition v0.6
 
+## v0.6.3 snap invariant
+
+Do not re-enable ScrollTrigger `snap` or CSS `scroll-snap-type` on a transition using the default `snapStrategy:"glide"`. Glide is intentionally single-authority: Observer claims one eligible boundary gesture and one GSAP document-scroll tween drives the entire section transition.
+
+Do not globally prevent wheel/touch events. `SnapGlideController` is intentionally conditional: input away from a transition boundary, inside a tall section, or inside a nested scroll container that can still scroll must remain native.
+
+If a client explicitly wants settle-after-scroll behavior, use `snapStrategy:"settle"`; do not combine the two strategies.
+
+
 ## Non-negotiable architecture
 
 Do **not** add new custom scroll-position/snap/smoothing logic to the primary engine.
@@ -104,3 +113,24 @@ At minimum verify:
 - destroy kills ScrollTrigger and timeline
 - no takeover input/scroll lock is created for normal scrub/snap
 - scene endpoint commit remains exact
+
+## Scene cold-start / incoming-section ownership (v0.6.1)
+
+Do not independently reveal/hide authored backgrounds for each `data-st-background` section once the persistent scene surface is ready. The engine intentionally makes all managed background sections transparent together after the first drawable canvas visual exists; otherwise an incoming section background can cover the continuous canvas while its endpoint is still warming.
+
+The current and next static scene backgrounds are high-priority requests. For the very first network paint, prefer one `<link rel="preload" as="image" ... fetchpriority="high">` for the initial scene or a host-level loading cover. Do not preload all scene backgrounds or all sequence frames.
+
+
+## v0.6.2 fast-swipe invariant
+
+For sequence scrub/snap, never solve aggressive mobile flings by taking scroll ownership. The primary engine must remain ScrollTrigger/native-scroll driven. Use `ScrollTrigger.getVelocity()` only to influence AssetManager scheduling.
+
+Required invariants:
+
+- frame 0 and the final effective frame are exact; never quantize endpoints
+- slow/stationary scrub uses step 1
+- stale queued nearby/progressive work may be discarded on a fast directionally decisive fling
+- already-active requests are preempted only conservatively (extreme tier, low priority, clearly behind, at most one decision at a time)
+- after the quiet/settle timer, reset velocity and request the exact stationary frame
+- do not increase network concurrency dynamically as a substitute for prioritization
+- diagnostics should expose velocity/projected progress/adaptive step for field debugging

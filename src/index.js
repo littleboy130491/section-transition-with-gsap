@@ -3,7 +3,7 @@ import { Manager } from "./core/Manager.js";
 import { registerGSAP } from "./core/GSAPAdapter.js";
 
 export const SectionTransition = {
-  version: "0.6.0",
+  version: "0.6.3",
 
   useGSAP(gsap, ScrollTrigger) {
     registerGSAP(gsap, ScrollTrigger);

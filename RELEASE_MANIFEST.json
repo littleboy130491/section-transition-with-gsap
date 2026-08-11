@@ -1,11 +1,11 @@
 {
-  "version": "0.6.0",
-  "zip": "section-transition-v0.6.0.zip",
+  "version": "0.6.3",
+  "zip": "section-transition-v0.6.3.zip",
   "architecture": {
     "primary_scroll_engine": "GSAP ScrollTrigger",
     "scrub": "ScrollTrigger-driven normalized progress",
-    "snap": "ScrollTrigger-driven progress + endpoint snapping; CSS scroll-snap remains authoritative when snap=auto and already enabled",
-    "auto_alias": "snap",
+    "snap": "Observer-driven one-phase GSAP document-scroll glide; ScrollTrigger maps resulting scroll to normalized progress",
+    "auto_alias": "snap glide",
     "takeover_compatibility": "explicit scroll.mode=takeover",
     "legacy_scrub": "scroll.engine=legacy"
   },
@@ -71,5 +71,20 @@
     "examples/auto-video.html",
     "examples/scrub-image-sequence.html",
     "examples/self-contained-demo.html"
-  ]
+  ],
+  "sequence_fast_scroll": {
+    "velocity_source": "ScrollTrigger.getVelocity()",
+    "prediction": "projects target progress ahead of aggressive swipes",
+    "adaptive_frames": "step 1/2/3/4 by velocity; endpoints remain exact",
+    "queue": "promotes current/predictive frames and prunes stale queued work",
+    "preemption": "at extreme velocity, may abort one stale low-priority active request",
+    "settle": "returns to exact frame selection after scrolling stops"
+  },
+  "snap_glide": {
+    "input": "ScrollTrigger.observe() wheel/touch intent at eligible boundaries",
+    "motion": "one GSAP tween of real document scroll position",
+    "css_snap": "suppressed during glide ownership and restored on destroy",
+    "tall_sections": "native scrolling until outgoing final-viewport boundary",
+    "legacy": "scroll.snapStrategy=settle"
+  }
 }

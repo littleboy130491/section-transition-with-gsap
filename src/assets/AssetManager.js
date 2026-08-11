@@ -2,11 +2,12 @@ import { FrameCache } from "./FrameCache.js";
 import { clamp, idle, cancelIdle } from "../utils/common.js";
 
 const PRIORITY = Object.freeze({
-  critical: 0,
-  requested: 1,
-  nearby: 2,
-  progressive: 3,
-  normal: 4
+  requested: 0,
+  predictive: 1,
+  critical: 2,
+  nearby: 3,
+  progressive: 4,
+  normal: 5
 });
 
 function abortError(message = "Aborted") {
@@ -38,6 +39,8 @@ export class AssetManager {
     this.idleIds = new Set();
     this.controllers = new Map();
     this.queue = [];
+    this.queuedJobs = new Map();
+    this.activeJobs = new Map();
     this.activeCount = 0;
     this.sequence = 0;
     this.destroyed = false;
@@ -155,7 +158,19 @@ export class AssetManager {
     const cached = this.cache.get(index);
     if (cached) return Promise.resolve(cached);
 
-    if (this.inflight.has(index)) return this.inflight.get(index);
+    if (this.inflight.has(index)) {
+      // A fast fling may turn a formerly-low-priority nearby request into the
+      // exact frame the user needs now. Promote queued work in place instead of
+      // enqueueing a duplicate request. Active requests are left alone.
+      const queued = this.queuedJobs.get(index);
+      const nextRank = PRIORITY[priority] ?? PRIORITY.normal;
+      if (queued && nextRank < queued.rank) {
+        queued.priority = priority;
+        queued.rank = nextRank;
+        this.pump();
+      }
+      return this.inflight.get(index);
+    }
 
     const gatedError = this.failureGate(index);
     if (gatedError) return Promise.reject(gatedError);
@@ -168,17 +183,163 @@ export class AssetManager {
     });
 
     this.inflight.set(index, promise);
-    this.queue.push({
+    const job = {
       index,
       priority,
       rank: PRIORITY[priority] ?? PRIORITY.normal,
       sequence: this.sequence++,
       resolve: resolveJob,
       reject: rejectJob
-    });
+    };
+    this.queue.push(job);
+    this.queuedJobs.set(index, job);
     this.pump();
 
     return promise;
+  }
+
+  motionConfig() {
+    return this.config.preload?.motion || {};
+  }
+
+  motionTier(velocity = 0) {
+    const cfg = this.motionConfig();
+    const speed = Math.abs(Number(velocity) || 0);
+    const medium = Math.max(1, Number(cfg.mediumVelocity) || 900);
+    const fast = Math.max(medium, Number(cfg.fastVelocity) || 1800);
+    const extreme = Math.max(fast, Number(cfg.extremeVelocity) || 2800);
+    if (speed >= extreme) return 3;
+    if (speed >= fast) return 2;
+    if (speed >= medium) return 1;
+    return 0;
+  }
+
+  cancelQueued(job, reason = "Superseded") {
+    if (!job || !this.queuedJobs.has(job.index)) return false;
+    const pos = this.queue.indexOf(job);
+    if (pos >= 0) this.queue.splice(pos, 1);
+    this.queuedJobs.delete(job.index);
+    this.inflight.delete(job.index);
+    job.reject(abortError(reason));
+    return true;
+  }
+
+  pruneMotionQueue(targetIndex, projectedIndex, direction, keepSet = new Set()) {
+    const cfg = this.motionConfig();
+    if (cfg.pruneStale === false) return 0;
+
+    const radius = Math.max(3, Number(cfg.keepRadius) || Math.max(6, this.config.preload?.ahead || 12));
+    const lo = Math.max(0, Math.min(targetIndex, projectedIndex) - radius);
+    const hi = Math.min(this.source.count - 1, Math.max(targetIndex, projectedIndex) + radius);
+    let removed = 0;
+
+    for (const job of [...this.queue]) {
+      // Exact requested frames are never discarded. Startup critical safety
+      // frames are lower priority than interaction, but remain queued so a
+      // fast fling cannot destroy the coarse fallback skeleton entirely.
+      if (job.priority === "critical" || job.rank <= PRIORITY.requested || keepSet.has(job.index)) continue;
+      const inWindow = job.index >= lo && job.index <= hi;
+      const directionallyUseful = direction > 0
+        ? job.index >= targetIndex - 1
+        : direction < 0
+          ? job.index <= targetIndex + 1
+          : true;
+      if (inWindow && directionallyUseful) continue;
+      if (this.cancelQueued(job, "Superseded by fast scroll")) removed++;
+    }
+    return removed;
+  }
+
+  preemptStaleActive(targetIndex, direction, velocity, keepSet = new Set()) {
+    const cfg = this.motionConfig();
+    if (cfg.preemptStale === false || this.motionTier(velocity) < 3) return false;
+    const maxConcurrent = Math.max(1, this.config.preload.maxConcurrent || 4);
+    if (this.activeCount < maxConcurrent || !this.queuedJobs.has(targetIndex)) return false;
+
+    const staleDistance = Math.max(8, Number(cfg.preemptDistance) || Math.max(12, this.config.preload?.ahead || 12));
+    let candidate = null;
+    let candidateDistance = -1;
+    for (const active of this.activeJobs.values()) {
+      const job = active.job;
+      if (!job || job.rank < PRIORITY.critical || keepSet.has(job.index)) continue;
+      const distance = Math.abs(job.index - targetIndex);
+      const lowPriority = job.rank >= PRIORITY.nearby;
+      const veryStaleCritical = job.priority === "critical" && distance > staleDistance * 2;
+      if (!lowPriority && !veryStaleCritical) continue;
+      const behind = direction > 0
+        ? job.index < targetIndex - staleDistance
+        : direction < 0
+          ? job.index > targetIndex + staleDistance
+          : distance > staleDistance;
+      if (!behind || distance <= candidateDistance) continue;
+      candidate = active;
+      candidateDistance = distance;
+    }
+
+    if (!candidate?.controller) return false;
+    try { candidate.controller.abort(); } catch (_) { return false; }
+    return true;
+  }
+
+  scheduleMotion(index, motion = {}) {
+    if (this.destroyed) return;
+    index = clamp(Math.round(index), 0, this.source.count - 1);
+    const cfg = this.motionConfig();
+    if (cfg.enabled === false) {
+      this.load(index, "requested").catch(() => {});
+      this.preloadNearby(index);
+      return;
+    }
+
+    const direction = Number(motion.direction) < 0 ? -1 : 1;
+    const velocity = Number(motion.velocity) || 0;
+    const tier = this.motionTier(velocity);
+    const projectedIndex = clamp(
+      Math.round(Number.isFinite(motion.projectedIndex) ? motion.projectedIndex : index),
+      0,
+      this.source.count - 1
+    );
+    const keep = new Set([index, projectedIndex]);
+
+    // Exact current visual always wins. The projected destination is next.
+    this.load(index, "requested").catch(() => {});
+
+    if (tier > 0 && projectedIndex !== index) {
+      const anchors = tier >= 2 ? 3 : 2;
+      for (let n = 1; n <= anchors; n++) {
+        const anchor = clamp(
+          Math.round(index + ((projectedIndex - index) * n) / anchors),
+          0,
+          this.source.count - 1
+        );
+        keep.add(anchor);
+        if (!this.cache.has(anchor)) this.load(anchor, "predictive").catch(() => {});
+      }
+
+      // Keep one sparse safety frame near the predicted landing warm. Critical
+      // indexes are already evenly distributed through the sequence.
+      const safety = this.criticalIndexes()
+        .sort((a, b) => Math.abs(a - projectedIndex) - Math.abs(b - projectedIndex))[0];
+      if (Number.isInteger(safety)) {
+        keep.add(safety);
+        if (!this.cache.has(safety)) this.load(safety, "predictive").catch(() => {});
+      }
+    }
+
+    if (tier >= 2) this.pruneMotionQueue(index, projectedIndex, direction, keep);
+    if (tier >= 3) this.preemptStaleActive(index, direction, velocity, keep);
+
+    if (tier === 0) this.preloadNearby(index);
+    else {
+      // A small directional halo improves continuity without refilling the queue
+      // with every skipped intermediate frame.
+      const halo = tier === 1 ? 3 : 2;
+      for (let n = 1; n <= halo; n++) {
+        const i = clamp(index + direction * n, 0, this.source.count - 1);
+        keep.add(i);
+        if (!this.cache.has(i)) this.load(i, "nearby").catch(() => {});
+      }
+    }
   }
 
   pump() {
@@ -191,6 +352,7 @@ export class AssetManager {
 
     while (this.activeCount < maxConcurrent && this.queue.length) {
       const job = this.queue.shift();
+      this.queuedJobs.delete(job.index);
       this.execute(job);
     }
   }
@@ -206,6 +368,7 @@ export class AssetManager {
     const url = this.frameUrl(job.index);
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     this.controllers.set(job.index, controller);
+    this.activeJobs.set(job.index, { job, controller });
     let timedOut = false;
     const requestTimer = controller
       ? setTimeout(() => {
@@ -243,6 +406,7 @@ export class AssetManager {
     } finally {
       if (requestTimer) clearTimeout(requestTimer);
       this.controllers.delete(job.index);
+      this.activeJobs.delete(job.index);
       this.inflight.delete(job.index);
       this.activeCount = Math.max(0, this.activeCount - 1);
       this.pump();
@@ -358,6 +522,27 @@ export class AssetManager {
     return null;
   }
 
+  bestCached(index, options = {}) {
+    const nearest = this.nearestCached(index);
+    if (!nearest || !options.preferMovement || !options.direction) return nearest;
+
+    const direction = options.direction < 0 ? -1 : 1;
+    const paintedIndex = Number.isInteger(options.paintedIndex) ? options.paintedIndex : null;
+    const maxLead = Math.max(2, Number(options.maxLead) || 8);
+
+    // When the nearest frame is simply the one already on screen, a fast fling
+    // looks frozen. If a directionally-correct predictive frame is available
+    // within a modest lead window, advance to it instead of holding stale pixels.
+    if (paintedIndex == null || nearest.index !== paintedIndex) return nearest;
+    for (let distance = 1; distance <= maxLead; distance++) {
+      const candidateIndex = index + direction * distance;
+      if (candidateIndex < 0 || candidateIndex >= this.source.count) break;
+      const frame = this.cache.get(candidateIndex);
+      if (frame) return { index: candidateIndex, frame };
+    }
+    return nearest;
+  }
+
   readiness() {
     const critical = this.criticalIndexes();
     const loaded = critical.filter((i) => this.loadedEver.has(i)).length;
@@ -368,7 +553,8 @@ export class AssetManager {
       cacheSize: this.cache.size,
       failed: this.failed.size,
       queued: this.queue.length,
-      active: this.activeCount
+      active: this.activeCount,
+      queuedIndexes: this.queue.slice(0, 12).map((job) => job.index)
     };
   }
 
@@ -383,12 +569,15 @@ export class AssetManager {
       try { controller?.abort?.(); } catch (_) {}
     }
     this.controllers.clear();
+    this.activeJobs.clear();
 
     const error = abortError("AssetManager destroyed");
     for (const job of this.queue.splice(0)) {
+      this.queuedJobs.delete(job.index);
       this.inflight.delete(job.index);
       job.reject(error);
     }
+    this.queuedJobs.clear();
 
     this.cache.clear();
     this.failed.clear();

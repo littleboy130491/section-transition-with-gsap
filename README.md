@@ -1,4 +1,4 @@
-# SectionTransition v0.6.0
+# SectionTransition v0.6.3
 
 Scene-aware image-sequence and video transitions for ordinary HTML sections.
 
@@ -148,85 +148,158 @@ scroll: { scrub: 0.08 }   // 0.08s catch-up smoothing
 
 The old `scroll.smoothing` option is retained as a compatibility hint, but new configurations should use `scroll.scrub`.
 
+## Aggressive mobile swipes / velocity-aware sequence scheduling
+
+Image sequences can decode more slowly than a high-velocity mobile fling advances scroll progress. v0.6.2 keeps native scrolling untouched and adapts **media scheduling**, not the user's gesture:
+
+```text
+slow swipe       -> exact frame-by-frame requests
+medium swipe     -> light frame stepping + directional preload
+fast swipe       -> projected-frame preload + stale queue pruning
+extreme fling    -> optional preemption of one stale low-priority request
+scroll settles   -> immediately return to exact frame selection
+endpoints        -> always exact
+```
+
+The driver uses ScrollTrigger's scroll velocity and projects a short distance ahead so scarce network/decode slots are spent on frames the user is actually approaching. Frames may be intentionally skipped during a fast fling; this is preferable to holding one stale frame and then jumping.
+
+Defaults:
+
+```js
+preload: {
+  maxConcurrent: 4,
+  motion: {
+    enabled: true,
+    predictionMs: 120,
+    settleMs: 120,
+    mediumVelocity: 900,
+    fastVelocity: 1800,
+    extremeVelocity: 2800,
+    adaptiveFrames: true,
+    maxStep: 4,
+    pruneStale: true,
+    preemptStale: true,
+    keepRadius: 12,
+    preemptDistance: 16
+  }
+}
+```
+
+For heavy mobile image sequences, a small ScrollTrigger catch-up buffer is also useful:
+
+```js
+scroll: {
+  mode: "scrub",
+  scrub: 0.08 // try roughly 0.08-0.12 for mobile-heavy sequences
+}
+```
+
+Do not solve frame starvation by blindly raising `maxConcurrent`; more simultaneous downloading/decoding can increase mobile CPU and memory pressure. Prefer responsive lower-resolution sequence assets when possible.
+
 ---
 
 # Snap mode
 
-`snap` is now scroll-driven instead of scroll-lock-driven.
+`mode: "snap"` uses the v0.6.3 **glide** strategy by default. This is deliberately different from ScrollTrigger's built-in settle-after-scroll `snap`.
 
 ```js
 scroll: {
   mode: "snap",
-  scrub: 0.06,
-  snap: true
+  snapStrategy: "glide",
+  snapGlide: {
+    duration: { min: 0.42, max: 0.72 },
+    ease: "power2.inOut"
+  }
 }
 ```
 
 Behavior:
 
 ```text
-user scrolls
+viewport is aligned at a transition boundary
     ↓
-transition progress follows real scroll
+one wheel/swipe intent is detected by ScrollTrigger.observe()
     ↓
-user releases
+that boundary gesture is prevented
     ↓
-ScrollTrigger completes to progress 0 or 1
+one GSAP tween moves the real document scroll position A → B
+    ↓
+ScrollTrigger progress + media + content follow that same scroll tween
+    ↓
+target section is aligned
 ```
 
-Reverse is the same timeline in the opposite direction. There is no global wheel/touch `preventDefault`, document scroll lock, synthetic landing recovery, or takeover handoff.
+There is no `native scroll → pause → second snap animation` phase. Additional momentum events from the same wheel/trackpad/swipe gesture are absorbed until the gesture stops, preventing accidental multi-section skipping.
 
-### `mode: "auto"`
+The glide controller only claims input at an eligible boundary. In a section taller than the viewport, ordinary scrolling remains native until its final viewport reaches the outgoing transition boundary. Nested scroll containers are also allowed to consume their own scroll first.
 
-For compatibility, v0.6 treats:
+### CSS scroll-snap
 
-```js
-scroll: { mode: "auto" }
-```
-
-as an alias for:
-
-```js
-scroll: { mode: "snap" }
-```
-
-If you need the old one-gesture cinematic takeover, use `mode: "takeover"` explicitly.
-
-### Existing CSS scroll-snap
-
-Default:
-
-```js
-snap: "auto"
-```
-
-If the document already has CSS `scroll-snap-type`, SectionTransition lets native CSS snapping remain the landing authority and does **not** install a second ScrollTrigger snap animation.
-
-If CSS snap is absent, `snap: "auto"` installs the default ScrollTrigger endpoint snap.
-
-Force ScrollTrigger snapping even on a CSS-snap page:
+Glide mode must have a single motion authority. By default it temporarily suppresses root/body `scroll-snap-type` and `scroll-behavior` while the manager is active, then restores the exact previous inline values/priorities on `destroy()`.
 
 ```js
 scroll: {
   mode: "snap",
-  snap: true
-}
-```
-
-Custom ScrollTrigger snap configuration is passed through:
-
-```js
-scroll: {
-  mode: "snap",
-  snap: {
-    snapTo: [0, 1],
-    directional: true,
-    delay: 0.05,
-    duration: { min: 0.2, max: 0.7 },
-    ease: "power2.inOut"
+  snapStrategy: "glide",
+  snapGlide: {
+    disableCssSnap: true // default
   }
 }
 ```
+
+Do not rely on CSS `scroll-snap-type` for the same scene chain when glide mode is active. `scroll-snap-align` declarations may remain in your stylesheet; without an active snap container they do nothing.
+
+### Legacy settle strategy
+
+If you intentionally want the old ScrollTrigger/native settle-after-scroll behavior, opt into it explicitly:
+
+```js
+scroll: {
+  mode: "snap",
+  snapStrategy: "settle",
+  scrub: 0.08,
+  snap: {
+    snapTo: [0, 1],
+    directional: true,
+    inertia: false,
+    delay: 0,
+    duration: { min: 0.12, max: 0.28 }
+  }
+}
+```
+
+`settle` is kept for compatibility. It is not recommended when the desired interaction is one continuous section-to-section motion.
+
+### `mode: "auto"`
+
+For compatibility, `auto` remains an alias of `snap`, so in v0.6.3 it also uses the glide strategy unless `snapStrategy: "settle"` is explicitly configured.
+
+The older cinematic media takeover is still available as:
+
+```js
+scroll: { mode: "takeover" }
+```
+
+### Snap glide tuning
+
+```js
+scroll: {
+  mode: "snap",
+  snapGlide: {
+    inputTolerance: 8,
+    dragMinimum: 6,
+    boundaryTolerance: 18,
+    duration: { min: 0.42, max: 0.72 },
+    ease: "power2.inOut",
+    onStopDelay: 0.18,
+    keyboard: true
+  }
+}
+```
+
+The animation duration scales modestly with the travel distance. Keep it relatively short; overly long values can make section navigation feel detached from the gesture.
+
+`manager.snapDiagnostics()` reports whether the glide observer is installed, whether a glide is currently animating, and whether CSS snap suppression is active.
 
 ---
 
@@ -275,18 +348,35 @@ data-st-scrub       outgoing transition config name
 
 Only semantic scene relationships belong in HTML. Technical tuning stays in JavaScript.
 
-### Fail-open ownership
+### Continuous scene ownership and cold-start loading
 
-SectionTransition does not remove an authored fallback background until a drawable managed background exists.
+The persistent canvas becomes the single visual owner only after the initially visible scene has produced a drawable image. Until then, authored section styling remains untouched.
+
+Once that first visual exists, **all sections with `data-st-background` become transparent surfaces together**. This is important: an incoming section must not cover the persistent canvas with its own background color/image while its static endpoint is still loading.
 
 ```text
-authored background
-→ managed scene successfully paints
-→ .st-scene-owned
-→ authored background becomes transparent
+page starts
+→ authored styling remains available
+→ current scene loads + paints on persistent canvas
+→ persistent surface becomes ready
+→ all data-st-background sections become transparent
+→ current/next backgrounds continue warming behind the transition
 ```
 
-If the managed image fails, the authored page remains visible.
+The current scene and immediately-next scene are requested with high fetch priority. Farther scene preloads remain normal priority. If a managed background ultimately fails, that individual section drops persistent-surface ownership so its authored CSS can fail open.
+
+For a completely clean **cold first paint**, the browser still needs the first image bytes before either CSS or canvas can show them. Preload only the first critical scene in `<head>` (do not preload every scene):
+
+```html
+<link
+  rel="preload"
+  as="image"
+  href="/images/desk.webp"
+  fetchpriority="high"
+>
+```
+
+For large immersive sites, a lightweight page loading cover that is removed after `await SectionTransition.init(...)` is also reasonable. Avoid blocking on every scene/sequence frame.
 
 ---
 
@@ -459,7 +549,12 @@ const manager = await SectionTransition.init({
   preload: {
     maxConcurrent: 4,
     ahead: 12,
-    behind: 6
+    behind: 6,
+    motion: {
+      enabled: true,
+      predictionMs: 120,
+      maxStep: 4
+    }
   },
 
   cache: {
@@ -487,7 +582,7 @@ const manager = await SectionTransition.init({
       },
       scroll: {
         mode: "snap",
-        snap: "auto"
+        snapStrategy: "glide"
       }
     }
   }
@@ -563,7 +658,7 @@ The significant behavior change is:
 
 ```text
 v0.5 mode:auto      gesture takeover + scroll lock
-v0.6 mode:auto      alias of ScrollTrigger snap
+v0.6.3 mode:auto    alias of one-phase GSAP Observer glide
 v0.6 mode:takeover  old takeover behavior
 ```
 
